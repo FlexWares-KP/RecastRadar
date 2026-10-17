@@ -16,6 +16,7 @@ local MIN_OVERLAY_HEIGHT = 200
 local OVERLAY_POSITION_VERSION = 2
 local OVERLAY_PADDING = 20
 local OVERLAY_LINE_HEIGHT_RATIO = 1.25
+local SKILL_LIST_ICON_SIZE = 20
 local FIRST_SKILL_SLOT = ACTION_BAR_FIRST_NORMAL_SLOT_INDEX + 1
 local LAST_SKILL_SLOT = ACTION_BAR_ULTIMATE_SLOT_INDEX + 1
 local HOTBARS = { HOTBAR_CATEGORY_PRIMARY, HOTBAR_CATEGORY_BACKUP }
@@ -129,6 +130,17 @@ local function GetSkillName(slotIndex, hotbarCategory)
         return nil
     end
     return name
+end
+
+local function GetIconMarkup(icon, size)
+    if type(icon) ~= "string" or icon == "" then
+        return ""
+    end
+    return string.format("|t%d:%d:%s|t ", size, size, icon)
+end
+
+local function GetAbilityIconMarkup(abilityId, size)
+    return GetIconMarkup(GetAbilityIcon(abilityId), size)
 end
 
 local function BuildFontChoices()
@@ -328,10 +340,21 @@ local function AddAlert(abilityId, skillName, now)
 
     addon.lastAlertAt[abilityId] = now
     table.insert(addon.alerts, {
-        text = "Recast " .. skillName,
+        text = "Recast: " .. skillName,
+        skillName = skillName,
+        icon = GetAbilityIcon(abilityId),
         shownAt = now,
     })
     PlayAlertSound()
+end
+
+local function GetAlertDisplayText(alert, fontSize)
+    if type(alert.icon) ~= "string" or alert.icon == "" or not alert.skillName then
+        return alert.text
+    end
+
+    local iconSize = math.max(12, math.min(fontSize, 32))
+    return string.format("Recast: %s%s", GetIconMarkup(alert.icon, iconSize), alert.skillName)
 end
 
 local function RefreshOverlay(now)
@@ -347,7 +370,12 @@ local function RefreshOverlay(now)
             if now >= fadeStartsAt then
                 alpha = 1 - (now - fadeStartsAt) / ALERT_FADE_DURATION_MS
             end
-            table.insert(activeAlerts, 1, { text = alert.text, alpha = alpha })
+            table.insert(activeAlerts, 1, {
+                text = alert.text,
+                skillName = alert.skillName,
+                icon = alert.icon,
+                alpha = alpha,
+            })
         end
     end
 
@@ -361,7 +389,8 @@ local function RefreshOverlay(now)
     local availableHeight = math.max(1, rootHeight - addon.settings.positionY - 20)
     local longestLine = 0
     for _, alert in ipairs(activeAlerts) do
-        longestLine = math.max(longestLine, #alert.text)
+        local visibleLength = #alert.text + (alert.icon and 2 or 0)
+        longestLine = math.max(longestLine, visibleLength)
     end
 
     local maxFontForWidth = longestLine > 0 and math.floor((width - OVERLAY_PADDING * 2) / (longestLine * 0.6)) or 64
@@ -414,7 +443,7 @@ local function RefreshOverlay(now)
         end
         label:SetDimensions(width - OVERLAY_PADDING * 2, lineHeight)
         label:SetFont(string.format("%s|%d|soft-shadow-thick", GetFontPath(), fontSize))
-        label:SetText(alert.text)
+        label:SetText(alert.isTitle and alert.text or GetAlertDisplayText(alert, fontSize))
         label:SetColor(color.r, color.g, color.b, (color.a or 1) * alert.alpha)
         label:SetHidden(false)
     end
@@ -604,7 +633,7 @@ local function RefreshSkillControls(control)
         row:SetAnchor(TOPLEFT, control, TOPLEFT, 0, (index - 1) * 26)
         row:SetDimensions(control:GetWidth(), 25)
         local enabled = IsSkillEnabled(skill.id)
-        row:SetText((enabled and "[ON] " or "[OFF] ") .. skill.name)
+        row:SetText((enabled and "[ON] " or "[OFF] ") .. GetAbilityIconMarkup(skill.id, SKILL_LIST_ICON_SIZE) .. skill.name)
         row:SetNormalFontColor(enabled and 0.65 or 0.6, enabled and 1 or 0.6, enabled and 0.65 or 0.6, 1)
         row:SetHidden(false)
     end
