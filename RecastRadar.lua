@@ -1,6 +1,7 @@
 local ADDON_NAME = "RecastRadar"
 local PANEL_ID = ADDON_NAME .. "_Settings"
-local SAVED_VARIABLES = "CooldownLapseMonitorSavedVariables"
+local SAVED_VARIABLES = "RecastRadarSavedVariables"
+local LEGACY_SAVED_VARIABLES = "CooldownLapseMonitorSavedVariables"
 local UPDATE_NAME = ADDON_NAME .. "_Update"
 local ALERT_FADE_DURATION_MS = 750
 local POLL_INTERVAL_MS = 100
@@ -839,6 +840,10 @@ local function OnAddonLoaded(_, addonName)
     end
 
     EVENT_MANAGER:UnregisterForEvent(ADDON_NAME, EVENT_ADD_ON_LOADED)
+    if type(_G[SAVED_VARIABLES]) ~= "table" and type(_G[LEGACY_SAVED_VARIABLES]) == "table" then
+        _G[SAVED_VARIABLES] = ZO_DeepTableCopy(_G[LEGACY_SAVED_VARIABLES])
+    end
+    _G[LEGACY_SAVED_VARIABLES] = nil
     addon.settings = ZO_SavedVars:NewAccountWide(SAVED_VARIABLES, 1, nil, DEFAULTS)
     addon.settings.zones = addon.settings.zones or {}
     addon.settings.skills = addon.settings.skills or {}
