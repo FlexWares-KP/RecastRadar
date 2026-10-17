@@ -1,10 +1,10 @@
 ## Title: Recast Radar
-## Description: Alerts when slotted skills finish cooldowns, including timers active when combat begins that expire afterward.
+## Description: Alerts when monitored skills, food, or drink timers expire, including timers active when combat begins that expire afterward.
 ## Author: Ixis
 ## Version: 1.0.0
 ## APIVersion: 101051 101052
 ## SavedVariables: RecastRadarSavedVariables
-## DependsOn: LibAddonMenu-2.0>=43 LibZone
+## DependsOn: LibAddonMenu-2.0>=43 LibZone LibFoodDrinkBuff
 ## OptionalDependsOn: LibMediaProvider
 
 RecastRadar.lua

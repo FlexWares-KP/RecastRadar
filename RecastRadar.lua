@@ -17,6 +17,7 @@ local OVERLAY_POSITION_VERSION = 2
 local OVERLAY_PADDING = 20
 local OVERLAY_LINE_HEIGHT_RATIO = 1.25
 local SKILL_LIST_ICON_SIZE = 20
+local FOOD_DRINK_TYPES = { "food", "drink" }
 local FIRST_SKILL_SLOT = ACTION_BAR_FIRST_NORMAL_SLOT_INDEX + 1
 local LAST_SKILL_SLOT = ACTION_BAR_ULTIMATE_SLOT_INDEX + 1
 local HOTBARS = { HOTBAR_CATEGORY_PRIMARY, HOTBAR_CATEGORY_BACKUP }
@@ -34,6 +35,8 @@ local BUILTIN_ALERT_SOUNDS = {
 local DEFAULTS = {
     enabled = true,
     showInCombatOnly = true,
+    monitorFood = true,
+    monitorDrink = true,
     minimumCooldownSeconds = 10,
     zones = {
         openWorld = true,
@@ -71,6 +74,10 @@ local addon = {
     settings = nil,
     inCombat = false,
     cooldowns = {},
+    foodDrink = {
+        food = nil,
+        drink = nil,
+    },
     lastAlertAt = {},
     alerts = {},
     skillRows = {},
@@ -332,29 +339,38 @@ local function IsSkillEnabled(abilityId)
     return addon.settings.skills[tostring(abilityId)] ~= false
 end
 
-local function AddAlert(abilityId, skillName, now)
-    local previousAlert = addon.lastAlertAt[abilityId]
+local function IsFoodDrinkEnabled(timeoutType)
+    if timeoutType == "food" then
+        return addon.settings.monitorFood
+    end
+    return addon.settings.monitorDrink
+end
+
+local function AddAlert(alertKey, displayName, now, icon, prefix)
+    local previousAlert = addon.lastAlertAt[alertKey]
     if previousAlert and now - previousAlert < 1000 then
         return
     end
 
-    addon.lastAlertAt[abilityId] = now
+    local alertPrefix = prefix or "Recast: "
+    addon.lastAlertAt[alertKey] = now
     table.insert(addon.alerts, {
-        text = "Recast: " .. skillName,
-        skillName = skillName,
-        icon = GetAbilityIcon(abilityId),
+        text = alertPrefix .. displayName,
+        name = displayName,
+        icon = icon,
+        prefix = alertPrefix,
         shownAt = now,
     })
     PlayAlertSound()
 end
 
 local function GetAlertDisplayText(alert, fontSize)
-    if type(alert.icon) ~= "string" or alert.icon == "" or not alert.skillName then
+    if type(alert.icon) ~= "string" or alert.icon == "" or not alert.name then
         return alert.text
     end
 
     local iconSize = math.max(12, math.min(fontSize, 32))
-    return string.format("Recast: %s%s", GetIconMarkup(alert.icon, iconSize), alert.skillName)
+    return string.format("%s%s%s", alert.prefix or "Recast: ", GetIconMarkup(alert.icon, iconSize), alert.name)
 end
 
 local function RefreshOverlay(now)
@@ -372,8 +388,9 @@ local function RefreshOverlay(now)
             end
             table.insert(activeAlerts, 1, {
                 text = alert.text,
-                skillName = alert.skillName,
+                name = alert.name,
                 icon = alert.icon,
+                prefix = alert.prefix,
                 alpha = alpha,
             })
         end
@@ -547,7 +564,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
         and previous.duration >= addon.settings.minimumCooldownSeconds * 1000
         and (not addon.settings.showInCombatOnly or addon.inCombat or previous.combatCountdown)
         and zoneEnabled and IsSkillEnabled(abilityId) then
-        AddAlert(abilityId, skillName, now)
+        AddAlert(abilityId, skillName, now, GetAbilityIcon(abilityId))
     end
 
     previous.wasCoolingDown = false
@@ -556,6 +573,66 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
     previous.cooldownRemaining = 0
     previous.effectRemaining = 0
     previous.combatCountdown = false
+end
+
+local function AddFoodDrinkExpiryAlert(timeoutType, timeout, now, nowSeconds, zoneEnabled)
+    if timeout.timeEnding > nowSeconds
+        or timeout.durationMilliseconds < addon.settings.minimumCooldownSeconds * 1000
+        or (addon.settings.showInCombatOnly and not addon.inCombat and not timeout.combatCountdown)
+        or not zoneEnabled then
+        return
+    end
+
+    local prefix = timeoutType == "food" and "Food expired: " or "Drink expired: "
+    local alertKey = timeoutType .. ":" .. tostring(timeout.abilityId)
+    AddAlert(alertKey, timeout.name, now, timeout.icon, prefix)
+end
+
+local function TrackFoodDrink(now, zoneEnabled)
+    local nowSeconds = now / 1000
+    local buffType, isDrink, abilityId, buffName, timeStarted, timeEnding, iconTexture =
+        LIB_FOOD_DRINK_BUFF:GetFoodBuffInfos("player")
+    local currentType
+    if buffType and buffType ~= 0
+        and type(isDrink) == "boolean"
+        and type(abilityId) == "number"
+        and type(buffName) == "string"
+        and buffName ~= ""
+        and type(timeEnding) == "number"
+        and timeEnding > nowSeconds then
+        currentType = isDrink and "drink" or "food"
+    end
+
+    for _, timeoutType in ipairs(FOOD_DRINK_TYPES) do
+        local previous = addon.foodDrink[timeoutType]
+        if not IsFoodDrinkEnabled(timeoutType) then
+            addon.foodDrink[timeoutType] = nil
+        elseif timeoutType == currentType then
+            if not previous or previous.abilityId ~= abilityId or previous.timeEnding ~= timeEnding then
+                if previous then
+                    AddFoodDrinkExpiryAlert(timeoutType, previous, now, nowSeconds, zoneEnabled)
+                end
+                local durationMilliseconds = 0
+                if type(timeStarted) == "number" and timeEnding > timeStarted then
+                    durationMilliseconds = (timeEnding - timeStarted) * 1000
+                end
+                addon.foodDrink[timeoutType] = {
+                    abilityId = abilityId,
+                    name = buffName,
+                    icon = iconTexture,
+                    timeEnding = timeEnding,
+                    durationMilliseconds = durationMilliseconds,
+                    combatCountdown = addon.inCombat,
+                }
+            else
+                previous.name = buffName
+                previous.icon = iconTexture
+            end
+        elseif previous then
+            addon.foodDrink[timeoutType] = nil
+            AddFoodDrinkExpiryAlert(timeoutType, previous, now, nowSeconds, zoneEnabled)
+        end
+    end
 end
 
 local function PollCooldowns()
@@ -574,6 +651,7 @@ local function PollCooldowns()
             TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
         end
     end
+    TrackFoodDrink(now, zoneEnabled)
     RefreshOverlay(now)
 end
 
@@ -583,6 +661,10 @@ local function RefreshMonitoring()
     else
         EVENT_MANAGER:UnregisterForUpdate(UPDATE_NAME)
         addon.cooldowns = {}
+        addon.foodDrink = {
+            food = nil,
+            drink = nil,
+        }
     end
 
     if not addon.settings.enabled or (addon.settings.showInCombatOnly and not addon.inCombat) then
@@ -660,8 +742,8 @@ end
 
 local function RegisterSettings()
     local library = LibAddonMenu2
-    if not library or not LibZone then
-        error("Recast Radar requires LibAddonMenu-2.0 and LibZone.")
+    if not library or not LibZone or not LIB_FOOD_DRINK_BUFF then
+        error("Recast Radar requires LibAddonMenu-2.0, LibZone, and LibFoodDrinkBuff.")
     end
 
     addon.panel = library:RegisterAddonPanel(PANEL_ID, {
@@ -678,7 +760,7 @@ local function RegisterSettings()
     local options = {
         {
             type = "description",
-            text = "Shows a transparent Recast alert when a slotted skill's cooldown or timed slot effect expires, subject to the combat-only setting.",
+            text = "Shows transparent Recast alerts when monitored skill cooldowns, timed slot effects, food, or drink effects expire.",
         },
         {
             type = "checkbox",
@@ -693,7 +775,7 @@ local function RegisterSettings()
         {
             type = "checkbox",
             name = "Show in combat only",
-            tooltip = "When enabled, alerts appear for timers that finish during combat or started during combat and finish afterward.",
+            tooltip = "When enabled, alerts appear for timers that finish during combat or are active when combat begins and finish afterward.",
             getFunc = function() return addon.settings.showInCombatOnly end,
             setFunc = function(value)
                 addon.settings.showInCombatOnly = value
@@ -705,9 +787,37 @@ local function RegisterSettings()
             default = DEFAULTS.showInCombatOnly,
         },
         {
+            type = "checkbox",
+            name = "Monitor food timeouts",
+            tooltip = "When enabled, show an alert when the active food effect expires.",
+            getFunc = function() return addon.settings.monitorFood end,
+            setFunc = function(value)
+                addon.settings.monitorFood = value
+                if not value then
+                    addon.foodDrink.food = nil
+                end
+                RefreshMonitoring()
+            end,
+            default = DEFAULTS.monitorFood,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor drink timeouts",
+            tooltip = "When enabled, show an alert when the active drink effect expires.",
+            getFunc = function() return addon.settings.monitorDrink end,
+            setFunc = function(value)
+                addon.settings.monitorDrink = value
+                if not value then
+                    addon.foodDrink.drink = nil
+                end
+                RefreshMonitoring()
+            end,
+            default = DEFAULTS.monitorDrink,
+        },
+        {
             type = "slider",
             name = "Minimum cooldown or effect duration (seconds)",
-            tooltip = "Only alert for cooldowns or timed slot effects whose full duration meets this threshold.",
+            tooltip = "Only alert for monitored timers whose full duration meets this threshold.",
             min = 0,
             max = 120,
             step = 1,
@@ -896,6 +1006,12 @@ local function OnCombatStateChanged(_, inCombat)
                 cooldown.combatCountdown = true
             end
         end
+        local nowSeconds = GetGameTimeMilliseconds() / 1000
+        for _, timeout in pairs(addon.foodDrink) do
+            if timeout.timeEnding > nowSeconds then
+                timeout.combatCountdown = true
+            end
+        end
     else
         addon.lastAlertAt = {}
     end
@@ -919,6 +1035,12 @@ local function OnAddonLoaded(_, addonName)
     addon.settings.minimumCooldownSeconds = math.max(0, math.min(120, addon.settings.minimumCooldownSeconds))
     if type(addon.settings.showInCombatOnly) ~= "boolean" then
         addon.settings.showInCombatOnly = DEFAULTS.showInCombatOnly
+    end
+    if type(addon.settings.monitorFood) ~= "boolean" then
+        addon.settings.monitorFood = DEFAULTS.monitorFood
+    end
+    if type(addon.settings.monitorDrink) ~= "boolean" then
+        addon.settings.monitorDrink = DEFAULTS.monitorDrink
     end
     local legacyFontIndex = math.max(1, math.min(#SYSTEM_FONTS, tonumber(addon.settings.fontIndex) or 1))
     addon.settings.fontName = addon.settings.fontName or SYSTEM_FONTS[legacyFontIndex].name
