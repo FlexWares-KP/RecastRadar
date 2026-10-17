@@ -1,5 +1,5 @@
 ## Title: Recast Radar
-## Description: Alerts when slotted skills finish a cooldown during combat.
+## Description: Alerts when slotted skills finish cooldowns, including timers started during combat that expire afterward.
 ## Author: Ixis
 ## Version: 1.0.0
 ## APIVersion: 101051 101052

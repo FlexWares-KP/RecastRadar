@@ -509,6 +509,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
             duration = observedDuration,
             cooldownRemaining = cooldownActive and remaining or 0,
             effectRemaining = effectActive and effectRemaining or 0,
+            startedInCombat = isCoolingDown and addon.inCombat or false,
         }
         return
     end
@@ -526,6 +527,9 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
             and effectRemaining > previousEffectRemaining + COOLDOWN_RESET_TOLERANCE_MS
         local wasReset = cooldownWasReset or effectWasReset
 
+        if not previous.wasCoolingDown or wasReset then
+            previous.startedInCombat = addon.inCombat
+        end
         previous.wasCoolingDown = true
         previous.remaining = observedRemaining
         previous.cooldownRemaining = cooldownActive and remaining or 0
@@ -541,7 +545,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
 
     if previous.wasCoolingDown and previous.remaining > 0
         and previous.duration >= addon.settings.minimumCooldownSeconds * 1000
-        and (not addon.settings.showInCombatOnly or addon.inCombat)
+        and (not addon.settings.showInCombatOnly or addon.inCombat or previous.startedInCombat)
         and zoneEnabled and IsSkillEnabled(abilityId) then
         AddAlert(abilityId, skillName, now)
     end
@@ -551,6 +555,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
     previous.duration = 0
     previous.cooldownRemaining = 0
     previous.effectRemaining = 0
+    previous.startedInCombat = false
 end
 
 local function PollCooldowns()
@@ -688,7 +693,7 @@ local function RegisterSettings()
         {
             type = "checkbox",
             name = "Show in combat only",
-            tooltip = "When enabled, cooldown alerts appear only if the cooldown finishes during combat.",
+            tooltip = "When enabled, alerts appear for timers that finish during combat or started during combat and finish afterward.",
             getFunc = function() return addon.settings.showInCombatOnly end,
             setFunc = function(value)
                 addon.settings.showInCombatOnly = value
