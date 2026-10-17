@@ -2,8 +2,14 @@ local ADDON_NAME = "RecastRadar"
 local PANEL_ID = ADDON_NAME .. "_Settings"
 local SAVED_VARIABLES = "CooldownLapseMonitorSavedVariables"
 local UPDATE_NAME = ADDON_NAME .. "_Update"
-local ALERT_DURATION_MS = 3500
+local ALERT_FADE_DURATION_MS = 750
 local POLL_INTERVAL_MS = 100
+local MIN_OVERLAY_WIDTH = 700
+local MAX_OVERLAY_WIDTH = 800
+local MIN_OVERLAY_HEIGHT = 200
+local OVERLAY_POSITION_VERSION = 2
+local OVERLAY_PADDING = 20
+local OVERLAY_LINE_HEIGHT_RATIO = 1.25
 local FIRST_SKILL_SLOT = ACTION_BAR_FIRST_NORMAL_SLOT_INDEX + 1
 local LAST_SKILL_SLOT = ACTION_BAR_ULTIMATE_SLOT_INDEX + 1
 local HOTBARS = { HOTBAR_CATEGORY_PRIMARY, HOTBAR_CATEGORY_BACKUP }
@@ -22,9 +28,10 @@ local DEFAULTS = {
     skills = {},
     fontSize = 26,
     fontColor = { r = 1, g = 1, b = 1, a = 1 },
+    alertDisplaySeconds = 3.5,
     locked = true,
     positionX = 0,
-    positionY = 130,
+    positionY = 0,
 }
 
 local SYSTEM_FONTS = {
@@ -49,12 +56,15 @@ local addon = {
     lastAlertAt = {},
     alerts = {},
     skillRows = {},
+    alertLabels = {},
     fontChoices = {},
     fontOption = nil,
-    previewing = false,
+    moveMode = false,
     panel = nil,
     skillsControl = nil,
     overlay = nil,
+    overlayBackdrop = nil,
+    overlaySceneFragment = nil,
     overlayLabel = nil,
     cachedZoneId = nil,
     cachedZoneType = nil,
@@ -148,6 +158,14 @@ local function GetFontPath()
     return SYSTEM_FONTS[1].path
 end
 
+local function GetOverlayWidth()
+    local rootWidth = GuiRoot:GetWidth()
+    return math.max(
+        1,
+        math.min(rootWidth - 40, math.max(MIN_OVERLAY_WIDTH, math.min(MAX_OVERLAY_WIDTH, rootWidth * 0.5)))
+    )
+end
+
 local function RefreshFontChoices()
     addon.fontChoices = BuildFontChoices()
     if addon.fontOption then
@@ -173,7 +191,7 @@ local function AddAlert(abilityId, skillName, now)
     addon.lastAlertAt[abilityId] = now
     table.insert(addon.alerts, {
         text = "Recast " .. skillName,
-        expiresAt = now + ALERT_DURATION_MS,
+        shownAt = now,
     })
 end
 
@@ -181,25 +199,108 @@ local function RefreshOverlay(now)
     local activeAlerts = {}
     for index = #addon.alerts, 1, -1 do
         local alert = addon.alerts[index]
-        if alert.expiresAt <= now then
+        local fadeStartsAt = alert.shownAt + addon.settings.alertDisplaySeconds * 1000
+        local expiresAt = fadeStartsAt + ALERT_FADE_DURATION_MS
+        if expiresAt <= now then
             table.remove(addon.alerts, index)
         else
-            table.insert(activeAlerts, 1, alert.text)
+            local alpha = 1
+            if now >= fadeStartsAt then
+                alpha = 1 - (now - fadeStartsAt) / ALERT_FADE_DURATION_MS
+            end
+            table.insert(activeAlerts, 1, { text = alert.text, alpha = alpha })
         end
     end
 
-    if addon.previewing then
-        table.insert(activeAlerts, 1, "Recast [Preview]")
+    if addon.moveMode then
+        table.insert(activeAlerts, 1, { text = "Recast Radar", alpha = 1, isTitle = true })
     end
 
-    addon.overlayLabel:SetText(table.concat(activeAlerts, "\n"))
+    local rootHeight = GuiRoot:GetHeight()
+    local width = GetOverlayWidth()
+    local lineCount = math.max(1, #activeAlerts)
+    local availableHeight = math.max(1, rootHeight - addon.settings.positionY - 20)
+    local longestLine = 0
+    for _, alert in ipairs(activeAlerts) do
+        longestLine = math.max(longestLine, #alert.text)
+    end
+
+    local maxFontForWidth = longestLine > 0 and math.floor((width - OVERLAY_PADDING * 2) / (longestLine * 0.6)) or 64
+    local maxFontForHeight = math.floor((availableHeight - OVERLAY_PADDING * 2) / (lineCount * OVERLAY_LINE_HEIGHT_RATIO))
+    local fontSize = math.max(12, math.min(addon.settings.fontSize, maxFontForWidth, maxFontForHeight))
+    local lineHeight = math.ceil(fontSize * OVERLAY_LINE_HEIGHT_RATIO)
+    local height = math.min(
+        availableHeight,
+        math.max(MIN_OVERLAY_HEIGHT, OVERLAY_PADDING * 2 + lineCount * lineHeight)
+    )
+
+    addon.overlay:SetDimensions(width, height)
+    addon.overlayLabel:SetDimensions(width - OVERLAY_PADDING * 2, lineHeight)
+    addon.overlayLabel:SetFont(string.format("%s|%d|soft-shadow-thin", GetFontPath(), fontSize))
+    addon.overlayLabel:SetHidden(not addon.moveMode)
     local color = addon.settings.fontColor
-    addon.overlayLabel:SetColor(color.r, color.g, color.b, color.a or 1)
-    addon.overlayLabel:SetFont(string.format("%s|%d|soft-shadow-thin", GetFontPath(), addon.settings.fontSize))
-    local canMove = addon.previewing and not addon.settings.locked
+    for index, alert in ipairs(activeAlerts) do
+        local label
+        if alert.isTitle then
+            label = addon.overlayLabel
+            label:ClearAnchors()
+            label:SetAnchor(TOP, addon.overlay, TOP, 0, OVERLAY_PADDING)
+        else
+            label = addon.alertLabels[index]
+            if not label then
+                label = WINDOW_MANAGER:CreateControl(nil, addon.overlay, CT_LABEL)
+                label:SetDrawTier(DT_HIGH)
+                label:SetDrawLayer(DL_OVERLAY)
+                label:SetDrawLevel(101)
+                label:SetMouseEnabled(false)
+                label:SetHorizontalAlignment(TEXT_ALIGN_CENTER)
+                label:SetVerticalAlignment(TEXT_ALIGN_CENTER)
+                addon.alertLabels[index] = label
+            end
+            label:ClearAnchors()
+            local titleOffset = addon.moveMode and lineHeight or 0
+            local alertIndex = index - (addon.moveMode and 1 or 0)
+            label:SetAnchor(TOP, addon.overlay, TOP, 0, OVERLAY_PADDING + titleOffset + (alertIndex - 1) * lineHeight)
+        end
+        label:SetDimensions(width - OVERLAY_PADDING * 2, lineHeight)
+        label:SetFont(string.format("%s|%d|soft-shadow-thin", GetFontPath(), fontSize))
+        label:SetText(alert.text)
+        label:SetColor(color.r, color.g, color.b, (color.a or 1) * alert.alpha)
+        label:SetHidden(false)
+    end
+    for index = 1, #addon.alertLabels do
+        if not activeAlerts[index] or activeAlerts[index].isTitle then
+            addon.alertLabels[index]:SetHidden(true)
+        end
+    end
+
+    local canMove = addon.moveMode and not addon.settings.locked
+    if addon.moveMode then
+        addon.overlayBackdrop:SetCenterColor(0.035, 0.04, 0.07, 0.9)
+        addon.overlayBackdrop:SetEdgeColor(1, 0.78, 0.2, 1)
+    else
+        addon.overlayBackdrop:SetCenterColor(0, 0, 0, 0)
+        addon.overlayBackdrop:SetEdgeColor(0, 0, 0, 0)
+    end
     addon.overlay:SetMouseEnabled(canMove)
     addon.overlay:SetMovable(canMove)
-    addon.overlay:SetHidden(#activeAlerts == 0)
+    addon.overlay:SetHidden(not addon.moveMode and #activeAlerts == 0)
+end
+
+local function ToggleMoveMode()
+    addon.moveMode = not addon.moveMode
+    if addon.moveMode then
+        SCENE_MANAGER:AddFragment(addon.overlaySceneFragment)
+        addon.settings.locked = false
+    end
+    RefreshOverlay(GetGameTimeMilliseconds())
+    d(string.format("[Recast Radar] Move mode %s.", addon.moveMode and "enabled" or "disabled"))
+end
+
+local function StartMovingOverlay(control)
+    if addon.moveMode and not addon.settings.locked then
+        control:StartMoving()
+    end
 end
 
 local function TrackCooldown(slotIndex, hotbarCategory, now)
@@ -439,6 +540,20 @@ local function RegisterSettings()
         default = DEFAULTS.fontSize,
     })
     table.insert(options, {
+        type = "slider",
+        name = "Seconds before recast messages fade",
+        tooltip = "How long each recast message stays fully visible before fading out.",
+        min = 1,
+        max = 10,
+        step = 0.5,
+        getFunc = function() return addon.settings.alertDisplaySeconds end,
+        setFunc = function(value)
+            addon.settings.alertDisplaySeconds = value
+            RefreshOverlay(GetGameTimeMilliseconds())
+        end,
+        default = DEFAULTS.alertDisplaySeconds,
+    })
+    table.insert(options, {
         type = "colorpicker",
         name = "Font color",
         getFunc = function()
@@ -454,7 +569,7 @@ local function RegisterSettings()
     table.insert(options, {
         type = "checkbox",
         name = "Lock alert position",
-        tooltip = "Unlock the alert to drag it while the position preview is visible.",
+        tooltip = "Lock the alert position. Move mode unlocks it automatically.",
         getFunc = function() return addon.settings.locked end,
         setFunc = function(value)
             addon.settings.locked = value
@@ -464,12 +579,9 @@ local function RegisterSettings()
     })
     table.insert(options, {
         type = "button",
-        name = "Toggle alert position preview",
-        tooltip = "Show a sample alert. Unlock the position above and drag the text to move it.",
-        func = function()
-            addon.previewing = not addon.previewing
-            RefreshOverlay(GetGameTimeMilliseconds())
-        end,
+        name = "Toggle move mode",
+        tooltip = "Keep a visible Recast Radar block on screen so you can drag it. Toggle again to hide it.",
+        func = ToggleMoveMode,
     })
     table.insert(options, {
         type = "header",
@@ -499,7 +611,6 @@ end
 local function SetEnabled(enabled)
     addon.settings.enabled = enabled
     RefreshMonitoring()
-    d(string.format("[Recast Radar] %s.", enabled and "enabled" or "disabled"))
 end
 
 local function HandleSlashCommand(argument)
@@ -508,10 +619,12 @@ local function HandleSlashCommand(argument)
         SetEnabled(true)
     elseif command == "off" then
         SetEnabled(false)
+    elseif command == "move" then
+        ToggleMoveMode()
     elseif command == "" then
         LibAddonMenu2:OpenToPanel(addon.panel)
     else
-        d("[Recast Radar] Usage: /recast [on|off]")
+        d("[Recast Radar] Usage: /recastradar [on|off|move]")
     end
 end
 
@@ -552,21 +665,28 @@ local function OnAddonLoaded(_, addonName)
     addon.settings.fontName = addon.settings.fontName or SYSTEM_FONTS[legacyFontIndex].name
     addon.settings.fontIndex = nil
     addon.settings.fontSize = math.max(12, math.min(64, tonumber(addon.settings.fontSize) or DEFAULTS.fontSize))
+    addon.settings.alertDisplaySeconds = math.max(1, math.min(10, tonumber(addon.settings.alertDisplaySeconds) or DEFAULTS.alertDisplaySeconds))
     addon.settings.fontColor = addon.settings.fontColor or {
         r = DEFAULTS.fontColor.r,
         g = DEFAULTS.fontColor.g,
         b = DEFAULTS.fontColor.b,
         a = DEFAULTS.fontColor.a,
     }
-    addon.settings.positionX = tonumber(addon.settings.positionX) or DEFAULTS.positionX
-    addon.settings.positionY = tonumber(addon.settings.positionY) or DEFAULTS.positionY
+    if (tonumber(addon.settings.overlayPositionVersion) or 0) < OVERLAY_POSITION_VERSION then
+        addon.settings.positionX = 0
+        addon.settings.positionY = GuiRoot:GetHeight() / 3
+        addon.settings.overlayPositionVersion = OVERLAY_POSITION_VERSION
+    else
+        addon.settings.positionX = tonumber(addon.settings.positionX) or DEFAULTS.positionX
+        addon.settings.positionY = tonumber(addon.settings.positionY) or GuiRoot:GetHeight() / 3
+    end
 
     CreateOverlay()
     RegisterSettings()
     if LibMediaProvider then
         CALLBACK_MANAGER:RegisterCallback("LibMediaProvider_Registered", OnMediaRegistered)
     end
-    SLASH_COMMANDS["/recast"] = HandleSlashCommand
+    SLASH_COMMANDS["/recastradar"] = HandleSlashCommand
     addon.inCombat = IsUnitInCombat("player")
     EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_PLAYER_COMBAT_STATE, OnCombatStateChanged)
     EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_ACTION_SLOT_UPDATED, OnActionSlotUpdated)
@@ -574,35 +694,66 @@ local function OnAddonLoaded(_, addonName)
 end
 
 CreateOverlay = function()
-    local overlay = WINDOW_MANAGER:CreateControl(nil, GuiRoot, CT_CONTROL)
-    overlay:SetDimensions(640, 180)
-    overlay:SetAnchor(CENTER, GuiRoot, CENTER, addon.settings.positionX, addon.settings.positionY)
+    local overlay = WINDOW_MANAGER:CreateControl(nil, GuiRoot, CT_TOPLEVELCONTROL)
+    local width = GetOverlayWidth()
+    overlay:SetDimensions(width, MIN_OVERLAY_HEIGHT)
+    overlay:SetAnchor(TOP, GuiRoot, TOP, addon.settings.positionX, addon.settings.positionY)
+    overlay:SetDrawTier(DT_HIGH)
+    overlay:SetDrawLayer(DL_OVERLAY)
+    overlay:SetDrawLevel(100)
     overlay:SetClampedToScreen(true)
     overlay:SetMouseEnabled(false)
     overlay:SetMovable(false)
     overlay:SetHidden(true)
+    overlay:SetHandler("OnEffectivelyShown", function(control)
+        control:SetAlpha(1)
+    end)
     overlay:SetHandler("OnMouseDown", function(control, button)
-        if button == MOUSE_BUTTON_INDEX_LEFT and addon.previewing and not addon.settings.locked then
+        if button == MOUSE_BUTTON_INDEX_LEFT and addon.moveMode and not addon.settings.locked then
             control:StartMoving()
         end
     end)
+    overlay:SetHandler("OnReceiveDrag", StartMovingOverlay)
     overlay:SetHandler("OnMouseUp", function(control)
         control:StopMovingOrResizing()
-        local centerX, centerY = control:GetCenter()
-        local rootCenterX, rootCenterY = GuiRoot:GetCenter()
+        local centerX = control:GetCenter()
+        local rootCenterX = GuiRoot:GetCenter()
+        local rootTop = GuiRoot:GetTop()
         addon.settings.positionX = centerX - rootCenterX
-        addon.settings.positionY = centerY - rootCenterY
+        addon.settings.positionY = control:GetTop() - rootTop
         control:ClearAnchors()
-        control:SetAnchor(CENTER, GuiRoot, CENTER, addon.settings.positionX, addon.settings.positionY)
+        control:SetAnchor(TOP, GuiRoot, TOP, addon.settings.positionX, addon.settings.positionY)
+        RefreshOverlay(GetGameTimeMilliseconds())
     end)
     addon.overlay = overlay
 
+    local backdrop = WINDOW_MANAGER:CreateControl(nil, overlay, CT_BACKDROP)
+    backdrop:SetAnchor(TOPLEFT, overlay, TOPLEFT, 0, 0)
+    backdrop:SetAnchor(BOTTOMRIGHT, overlay, BOTTOMRIGHT, 0, 0)
+    backdrop:SetDrawTier(DT_HIGH)
+    backdrop:SetDrawLayer(DL_OVERLAY)
+    backdrop:SetDrawLevel(100)
+    backdrop:SetMouseEnabled(false)
+    backdrop:SetCenterColor(0, 0, 0, 0)
+    backdrop:SetEdgeColor(0, 0, 0, 0)
+    backdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/border_1px_3color.dds", 1, 1, 1, 1)
+    addon.overlayBackdrop = backdrop
+
     local label = WINDOW_MANAGER:CreateControl(nil, overlay, CT_LABEL)
-    label:SetAnchor(CENTER, overlay, CENTER, 0, 0)
-    label:SetDimensions(640, 180)
+    label:SetAnchor(TOP, overlay, TOP, 0, OVERLAY_PADDING)
+    label:SetDimensions(width - OVERLAY_PADDING * 2, 32)
+    label:SetDrawTier(DT_HIGH)
+    label:SetDrawLayer(DL_OVERLAY)
+    label:SetDrawLevel(101)
+    label:SetMouseEnabled(false)
     label:SetHorizontalAlignment(TEXT_ALIGN_CENTER)
     label:SetVerticalAlignment(TEXT_ALIGN_CENTER)
     addon.overlayLabel = label
+
+    addon.overlaySceneFragment = ZO_HUDFadeSceneFragment:New(overlay, 0, 0)
+    HUD_SCENE:AddFragment(addon.overlaySceneFragment)
+    HUD_UI_SCENE:AddFragment(addon.overlaySceneFragment)
+    SIEGE_BAR_SCENE:AddFragment(addon.overlaySceneFragment)
 end
 
 EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_ADD_ON_LOADED, OnAddonLoaded)
