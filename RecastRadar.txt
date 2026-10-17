@@ -1,5 +1,5 @@
 ## Title: Recast Radar
-## Description: Alerts for monitored skill, food, drink, and optional Arcanist crux events.
+## Description: Alerts for monitored skill, consumable, class-resource, proc, and world-skill-line events.
 ## Author: Ixis
 ## Version: 1.0.0
 ## APIVersion: 101051 101052

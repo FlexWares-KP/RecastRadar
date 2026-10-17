@@ -29,8 +29,83 @@ local NO_ALERT_SOUND = "None"
 local DEFAULT_ALERT_SOUND = "Recast Radar Swish"
 local DEFAULT_CRUX_READY_SOUND = "Crux ready gong"
 local DEFAULT_CRUX_BELOW_THREE_SOUND = "Crux below three"
-local ARCANIST_CLASS_ID = 7
+local DRAGONKNIGHT_CLASS_ID = 1
+local SORCERER_CLASS_ID = 2
+local NIGHTBLADE_CLASS_ID = 3
+local NECROMANCER_CLASS_ID = 6
+local ARCANIST_CLASS_ID = 117
 local MAX_CRUX = 3
+local MAX_SEETHING_FURY_STACKS = 3
+local NECROMANCER_CORPSE_LIFETIME_MS = 16000
+local CRYSTAL_FRAGMENTS_PASSIVE_ID = 46327
+local CRYSTAL_FRAGMENTS_BUFF_IDS = {
+    [46327] = true,
+    [46324] = true,
+    [114716] = true,
+}
+local SEETHING_FURY_BUFF_IDS = {
+    [122729] = true,
+    [122658] = true,
+}
+local VAMPIRE_STAGE_IDS = {
+    [135397] = 1,
+    [135399] = 2,
+    [135400] = 3,
+    [135402] = 4,
+    [135412] = 5,
+}
+local WEREWOLF_RAMPAGE_BUFF_IDS = {
+    [266377] = true,
+    [266523] = true,
+    [266524] = true,
+    [267416] = true,
+    [267417] = true,
+    [267418] = true,
+    [267425] = true,
+    [267426] = true,
+    [267427] = true,
+    [267428] = true,
+}
+local NIGHTBLADE_PROC_DATA = {
+    [122585] = {
+        name = "Grim Focus ready",
+        skillId = 61902,
+        threshold = 5,
+        buffIds = { [122585] = true, [61905] = true },
+    },
+    [122586] = {
+        name = "Merciless Resolve ready",
+        skillId = 61919,
+        threshold = 5,
+        buffIds = { [122586] = true, [61920] = true },
+    },
+    [122587] = {
+        name = "Relentless Focus ready",
+        skillId = 61927,
+        threshold = 4,
+        buffIds = { [122587] = true, [61928] = true },
+    },
+}
+local NECROMANCER_CORPSE_GENERATORS = {
+    [117926] = true,
+    [122385] = true,
+    [122390] = true,
+    [117967] = true,
+    [122364] = true,
+    [122359] = true,
+    [117972] = true,
+    [122374] = true,
+    [122371] = true,
+}
+local NECROMANCER_CORPSE_CONSUMERS = {
+    [116445] = true,
+    [118009] = true,
+    [118764] = true,
+    [116450] = true,
+    [118123] = true,
+    [118071] = true,
+    [118639] = true,
+}
 
 local BUILTIN_ALERT_SOUNDS = {
     { name = DEFAULT_ALERT_SOUND, sound = SOUNDS.DEATH_RECAP_KILLING_BLOW_SHOWN },
@@ -46,6 +121,14 @@ local DEFAULTS = {
     monitorFood = true,
     monitorDrink = true,
     monitorCrux = true,
+    monitorUltimate = false,
+    monitorSeethingFury = false,
+    monitorNightblade = false,
+    monitorCrystalFragments = false,
+    monitorNecromancerCorpses = false,
+    monitorWerewolf = false,
+    monitorVampire = false,
+    necromancerCorpseThreshold = 1,
     minimumCooldownSeconds = 10,
     zones = {
         openWorld = true,
@@ -99,6 +182,16 @@ local addon = {
     cruxReadySoundOption = nil,
     cruxBelowThreeSoundOption = nil,
     cruxCount = nil,
+    ultimateReady = nil,
+    seethingFuryStacks = nil,
+    nightbladeStacks = {},
+    crystalFragmentsReady = nil,
+    crystalFragmentsEventSeen = false,
+    necromancerCorpses = {},
+    necromancerCorpseReady = nil,
+    lastNecromancerEventAt = {},
+    werewolfForm = nil,
+    vampireStage = nil,
     moveMode = false,
     panel = nil,
     skillsControl = nil,
@@ -372,20 +465,65 @@ local function IsFoodDrinkAvailable()
         and type(LIB_FOOD_DRINK_BUFF.GetFoodBuffInfos) == "function"
 end
 
-local function IsArcanist()
+local function IsClass(globalClassName, fallbackClassId)
     if type(GetUnitClassId) ~= "function" then
         return false
     end
 
     local classId = GetUnitClassId("player")
-    local arcanistClassId = type(_G.CLASS_ID_ARCANIST) == "number" and _G.CLASS_ID_ARCANIST or ARCANIST_CLASS_ID
-    return classId == arcanistClassId
+    local expectedClassId = type(_G[globalClassName]) == "number" and _G[globalClassName] or fallbackClassId
+    return classId == expectedClassId
+end
+
+local function IsArcanist()
+    return IsClass("CLASS_ID_ARCANIST", ARCANIST_CLASS_ID)
+end
+
+local function IsDragonknight()
+    return IsClass("CLASS_ID_DRAGONKNIGHT", DRAGONKNIGHT_CLASS_ID)
+end
+
+local function IsSorcerer()
+    return IsClass("CLASS_ID_SORCERER", SORCERER_CLASS_ID)
+end
+
+local function IsNightblade()
+    return IsClass("CLASS_ID_NIGHTBLADE", NIGHTBLADE_CLASS_ID)
+end
+
+local function IsNecromancer()
+    return IsClass("CLASS_ID_NECROMANCER", NECROMANCER_CLASS_ID)
 end
 
 local function IsCruxAvailable()
     return IsArcanist()
         and type(GetUnitPower) == "function"
         and type(_G.POWERTYPE_COMBO) == "number"
+end
+
+local function GetPlayerBuffByIds(abilityIds)
+    if type(GetNumBuffs) ~= "function" or type(GetUnitBuffInfo) ~= "function" then
+        return nil
+    end
+
+    for buffIndex = 1, GetNumBuffs("player") do
+        local buffName, timeStarted, timeEnding, buffSlot, stackCount, icon, _, effectType, abilityType,
+            statusEffectType, abilityId = GetUnitBuffInfo("player", buffIndex)
+        if abilityIds[abilityId] then
+            return {
+                abilityId = abilityId,
+                name = buffName,
+                timeStarted = timeStarted,
+                timeEnding = timeEnding,
+                stackCount = tonumber(stackCount) or 0,
+                icon = icon,
+            }
+        end
+    end
+end
+
+local function CanShowResourceAlert(zoneEnabled)
+    return zoneEnabled and (not addon.settings.showInCombatOnly or addon.inCombat)
 end
 
 local function AddAlert(alertKey, displayName, now, icon, prefix, soundName)
@@ -682,6 +820,309 @@ local function TrackFoodDrink(now, zoneEnabled)
     end
 end
 
+local function TrackUltimate(now, zoneEnabled)
+    if not addon.settings.monitorUltimate
+        or type(GetUnitPower) ~= "function"
+        or type(_G.COMBAT_MECHANIC_FLAGS_ULTIMATE) ~= "number" then
+        addon.ultimateReady = nil
+        return
+    end
+
+    local current, maximum, effectiveMaximum =
+        GetUnitPower("player", _G.COMBAT_MECHANIC_FLAGS_ULTIMATE)
+    local threshold = tonumber(effectiveMaximum) or 0
+    if threshold <= 0 then
+        threshold = tonumber(maximum) or 0
+    end
+    if threshold <= 0 or type(current) ~= "number" then
+        addon.ultimateReady = nil
+        return
+    end
+
+    local isReady = current >= threshold
+    local previousReady = addon.ultimateReady
+    addon.ultimateReady = isReady
+    if previousReady == nil or previousReady or not isReady or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    AddAlert("ultimate:ready", "Ultimate ready", now)
+end
+
+local function TrackSeethingFury(now, zoneEnabled)
+    if not addon.settings.monitorSeethingFury or not IsDragonknight() then
+        addon.seethingFuryStacks = nil
+        return
+    end
+
+    local buff = GetPlayerBuffByIds(SEETHING_FURY_BUFF_IDS)
+    local stacks = buff and math.max(0, math.floor(buff.stackCount)) or 0
+    local previousStacks = addon.seethingFuryStacks
+    addon.seethingFuryStacks = stacks
+    if previousStacks == nil
+        or previousStacks >= MAX_SEETHING_FURY_STACKS
+        or stacks < MAX_SEETHING_FURY_STACKS
+        or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    AddAlert(
+        "seething-fury:ready",
+        "Seething Fury ready",
+        now,
+        buff and buff.icon or GetAbilityIcon(20805)
+    )
+end
+
+local function TrackNightblade(now, zoneEnabled)
+    if not addon.settings.monitorNightblade or not IsNightblade() then
+        addon.nightbladeStacks = {}
+        return
+    end
+
+    for trackerId, tracker in pairs(NIGHTBLADE_PROC_DATA) do
+        local buff = GetPlayerBuffByIds(tracker.buffIds)
+        local stacks = buff and math.max(0, math.floor(buff.stackCount)) or 0
+        local previousStacks = addon.nightbladeStacks[trackerId]
+        addon.nightbladeStacks[trackerId] = stacks
+        if previousStacks
+            and previousStacks < tracker.threshold
+            and stacks >= tracker.threshold
+            and CanShowResourceAlert(zoneEnabled) then
+            AddAlert(
+                "nightblade:" .. tostring(trackerId),
+                tracker.name,
+                now,
+                buff and buff.icon or GetAbilityIcon(tracker.skillId)
+            )
+        end
+    end
+end
+
+local function UpdateCrystalFragmentsReady(isReady, now, zoneEnabled, icon)
+    local previousReady = addon.crystalFragmentsReady
+    addon.crystalFragmentsReady = isReady
+    if previousReady == nil or previousReady or not isReady or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    AddAlert(
+        "crystal-fragments:ready",
+        "Crystal Fragments ready",
+        now,
+        icon or GetAbilityIcon(46324)
+    )
+end
+
+local function TrackCrystalFragments(now, zoneEnabled)
+    if not addon.settings.monitorCrystalFragments or not IsSorcerer() then
+        addon.crystalFragmentsReady = nil
+        addon.crystalFragmentsEventSeen = false
+        return
+    end
+
+    local buff = GetPlayerBuffByIds(CRYSTAL_FRAGMENTS_BUFF_IDS)
+    if buff then
+        UpdateCrystalFragmentsReady(true, now, zoneEnabled, buff.icon)
+    elseif not addon.crystalFragmentsEventSeen then
+        UpdateCrystalFragmentsReady(false, now, zoneEnabled)
+    end
+end
+
+local function PruneNecromancerCorpses(now)
+    for index = #addon.necromancerCorpses, 1, -1 do
+        if addon.necromancerCorpses[index] <= now then
+            table.remove(addon.necromancerCorpses, index)
+        end
+    end
+end
+
+local function AddNecromancerCorpse(now)
+    if #addon.necromancerCorpses < 3 then
+        table.insert(addon.necromancerCorpses, now + NECROMANCER_CORPSE_LIFETIME_MS)
+    end
+end
+
+local function ConsumeNecromancerCorpse()
+    if #addon.necromancerCorpses > 0 then
+        table.remove(addon.necromancerCorpses, 1)
+    end
+end
+
+local function IsNamedNecromancerCorpseGenerator(abilityName)
+    local lowerName = type(abilityName) == "string" and string.lower(abilityName) or ""
+    return string.find(lowerName, "blastbones", 1, true)
+        or string.find(lowerName, "skeletal", 1, true)
+        or string.find(lowerName, "spirit mender", 1, true)
+end
+
+local function IsNamedNecromancerCorpseConsumer(abilityName)
+    local lowerName = type(abilityName) == "string" and string.lower(abilityName) or ""
+    return string.find(lowerName, "boneyard", 1, true)
+        or string.find(lowerName, "siphon", 1, true)
+        or string.find(lowerName, "tether", 1, true)
+        or string.find(lowerName, "necrotic potency", 1, true)
+end
+
+local function OnCombatEvent(
+    _,
+    result,
+    _,
+    abilityName,
+    _,
+    _,
+    _,
+    sourceType,
+    _,
+    _,
+    _,
+    _,
+    _,
+    _,
+    _,
+    _,
+    abilityId
+)
+    if not addon.settings
+        or not addon.settings.monitorNecromancerCorpses
+        or not IsNecromancer()
+        or sourceType ~= COMBAT_UNIT_TYPE_PLAYER
+        or result ~= ACTION_RESULT_BEGIN then
+        return
+    end
+
+    local isGenerator = NECROMANCER_CORPSE_GENERATORS[abilityId] or IsNamedNecromancerCorpseGenerator(abilityName)
+    local isConsumer = NECROMANCER_CORPSE_CONSUMERS[abilityId] or IsNamedNecromancerCorpseConsumer(abilityName)
+    if not isGenerator and not isConsumer then
+        return
+    end
+
+    local now = GetGameTimeMilliseconds()
+    local eventKey = abilityId or abilityName
+    if not eventKey then
+        return
+    end
+    local previousEventAt = addon.lastNecromancerEventAt[eventKey]
+    if previousEventAt and now - previousEventAt < 500 then
+        return
+    end
+    addon.lastNecromancerEventAt[eventKey] = now
+
+    if isGenerator then
+        AddNecromancerCorpse(now)
+    elseif isConsumer then
+        ConsumeNecromancerCorpse()
+    end
+end
+
+local function TrackNecromancerCorpses(now, zoneEnabled)
+    if not addon.settings.monitorNecromancerCorpses or not IsNecromancer() then
+        addon.necromancerCorpses = {}
+        addon.necromancerCorpseReady = nil
+        addon.lastNecromancerEventAt = {}
+        return
+    end
+
+    PruneNecromancerCorpses(now)
+    local threshold = math.max(1, math.min(3, math.floor(addon.settings.necromancerCorpseThreshold or 1)))
+    local isReady = #addon.necromancerCorpses >= threshold
+    local previousReady = addon.necromancerCorpseReady
+    addon.necromancerCorpseReady = isReady
+    if previousReady == nil or previousReady or not isReady or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    AddAlert(
+        "necromancer:corpse",
+        "Necromancer corpse available",
+        now,
+        GetAbilityIcon(117926)
+    )
+end
+
+local function TrackWerewolf(now, zoneEnabled)
+    if not addon.settings.monitorWerewolf or type(IsPlayerInWerewolfForm) ~= "function" then
+        addon.werewolfForm = nil
+        return
+    end
+
+    local inWerewolfForm = IsPlayerInWerewolfForm()
+    local previousForm = addon.werewolfForm
+    addon.werewolfForm = inWerewolfForm
+    if previousForm == nil or previousForm == inWerewolfForm or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    if inWerewolfForm then
+        local rampageBuff = GetPlayerBuffByIds(WEREWOLF_RAMPAGE_BUFF_IDS)
+        AddAlert(
+            "werewolf:started",
+            "Werewolf form active",
+            now,
+            rampageBuff and rampageBuff.icon or GetAbilityIcon(32458)
+        )
+    else
+        AddAlert("werewolf:ended", "Werewolf form expired", now)
+    end
+end
+
+local function TrackVampire(now, zoneEnabled)
+    if not addon.settings.monitorVampire then
+        addon.vampireStage = nil
+        return
+    end
+
+    local buff = GetPlayerBuffByIds(VAMPIRE_STAGE_IDS)
+    local currentStage = buff and VAMPIRE_STAGE_IDS[buff.abilityId] or nil
+    local previousStage = addon.vampireStage
+    addon.vampireStage = currentStage
+    if previousStage == nil or previousStage == currentStage or not CanShowResourceAlert(zoneEnabled) then
+        return
+    end
+
+    if currentStage then
+        AddAlert(
+            "vampire:stage",
+            "Vampire stage " .. tostring(currentStage),
+            now,
+            buff.icon
+        )
+    else
+        AddAlert("vampire:stage-ended", "Vampire stage ended", now)
+    end
+end
+
+local function OnEffectChanged(
+    _,
+    change,
+    _,
+    _,
+    unitTag,
+    _,
+    _,
+    _,
+    icon,
+    _,
+    _,
+    _,
+    _,
+    _,
+    _,
+    abilityId
+)
+    if not addon.settings
+        or unitTag ~= "player"
+        or abilityId ~= CRYSTAL_FRAGMENTS_PASSIVE_ID
+        or not addon.settings.monitorCrystalFragments
+        or not IsSorcerer() then
+        return
+    end
+
+    addon.crystalFragmentsEventSeen = true
+    local zoneEnabled = IsCurrentZoneEnabled()
+    UpdateCrystalFragmentsReady(change ~= EFFECT_RESULT_FADED, GetGameTimeMilliseconds(), zoneEnabled, icon)
+end
+
 local function TrackCrux(now, zoneEnabled)
     if not addon.settings.monitorCrux or not IsCruxAvailable() then
         addon.cruxCount = nil
@@ -729,6 +1170,13 @@ local function PollCooldowns()
         end
     end
     TrackFoodDrink(now, zoneEnabled)
+    TrackUltimate(now, zoneEnabled)
+    TrackSeethingFury(now, zoneEnabled)
+    TrackNightblade(now, zoneEnabled)
+    TrackCrystalFragments(now, zoneEnabled)
+    TrackNecromancerCorpses(now, zoneEnabled)
+    TrackWerewolf(now, zoneEnabled)
+    TrackVampire(now, zoneEnabled)
     TrackCrux(now, zoneEnabled)
     RefreshOverlay(now)
 end
@@ -744,6 +1192,16 @@ local function RefreshMonitoring()
             drink = nil,
         }
         addon.cruxCount = nil
+        addon.ultimateReady = nil
+        addon.seethingFuryStacks = nil
+        addon.nightbladeStacks = {}
+        addon.crystalFragmentsReady = nil
+        addon.crystalFragmentsEventSeen = false
+        addon.necromancerCorpses = {}
+        addon.necromancerCorpseReady = nil
+        addon.lastNecromancerEventAt = {}
+        addon.werewolfForm = nil
+        addon.vampireStage = nil
     end
 
     if not addon.settings.enabled or (addon.settings.showInCombatOnly and not addon.inCombat) then
@@ -836,10 +1294,39 @@ local function RegisterSettings()
     })
     RefreshFontChoices()
 
-    local options = {
+    addon.fontOption = {
+        type = "dropdown",
+        name = "Font type",
+        tooltip = "Each font is previewed using its own typeface.",
+        choices = GetFontNames(),
+        scrollable = true,
+        reference = FONT_DROPDOWN_REFERENCE,
+        getFunc = function() return addon.settings.fontName end,
+        setFunc = function(value)
+            addon.settings.fontName = value
+            RefreshOverlay(GetGameTimeMilliseconds())
+        end,
+        default = SYSTEM_FONTS[1].name,
+    }
+    addon.alertSoundOption = {
+        type = "dropdown",
+        name = "Alert sound",
+        tooltip = "Choose the sound played when a Recast alert appears. Choose None to mute alerts.",
+        choices = BuildAlertSoundChoices(),
+        scrollable = 7,
+        reference = SOUND_DROPDOWN_REFERENCE,
+        getFunc = function() return addon.settings.alertSound end,
+        setFunc = function(value)
+            addon.settings.alertSound = value
+            PlayAlertSound(value)
+        end,
+        default = DEFAULTS.alertSound,
+    }
+
+    local generalControls = {
         {
             type = "description",
-            text = "Shows transparent Recast alerts when monitored skill cooldowns, timed slot effects, food, or drink effects expire.",
+            text = "Shows transparent alerts for monitored cooldowns, timed effects, consumables, and class mechanics.",
         },
         {
             type = "checkbox",
@@ -865,6 +1352,20 @@ local function RegisterSettings()
             end,
             default = DEFAULTS.showInCombatOnly,
         },
+        {
+            type = "slider",
+            name = "Minimum cooldown or effect duration (seconds)",
+            tooltip = "Only alert for monitored timers whose full duration meets this threshold.",
+            min = 0,
+            max = 120,
+            step = 1,
+            getFunc = function() return addon.settings.minimumCooldownSeconds end,
+            setFunc = function(value) addon.settings.minimumCooldownSeconds = value end,
+            default = DEFAULTS.minimumCooldownSeconds,
+        },
+    }
+
+    local cooldownControls = {
         {
             type = "checkbox",
             name = "Monitor food timeouts",
@@ -895,13 +1396,126 @@ local function RegisterSettings()
             end,
             default = DEFAULTS.monitorDrink,
         },
+    }
+
+    addon.cruxReadySoundOption = {
+        type = "dropdown",
+        name = "Crux ready sound",
+        tooltip = "Sound played when crux increases to three. Choose None to disable it.",
+        choices = BuildAlertSoundChoices(),
+        scrollable = 7,
+        reference = CRUX_READY_SOUND_DROPDOWN_REFERENCE,
+        disabled = function() return not IsCruxAvailable() end,
+        getFunc = function() return addon.settings.cruxReadySound end,
+        setFunc = function(value)
+            addon.settings.cruxReadySound = value
+            PlayAlertSound(value)
+        end,
+        default = DEFAULTS.cruxReadySound,
+    }
+    addon.cruxBelowThreeSoundOption = {
+        type = "dropdown",
+        name = "Crux below-three sound",
+        tooltip = "Sound played once when crux drops from three to below three. Choose None to disable it.",
+        choices = BuildAlertSoundChoices(),
+        scrollable = 7,
+        reference = CRUX_BELOW_THREE_SOUND_DROPDOWN_REFERENCE,
+        disabled = function() return not IsCruxAvailable() end,
+        getFunc = function() return addon.settings.cruxBelowThreeSound end,
+        setFunc = function(value)
+            addon.settings.cruxBelowThreeSound = value
+            PlayAlertSound(value)
+        end,
+        default = DEFAULTS.cruxBelowThreeSound,
+    }
+
+    local classControls = {
         {
-            type = "header",
-            name = "Arcanist crux",
+            type = "description",
+            text = "Class alerts are opt-in. Each tracker initializes silently and alerts only when its ready threshold is crossed.",
         },
         {
             type = "checkbox",
-            name = "Monitor Arcanist crux",
+            name = "Monitor Ultimate ready",
+            tooltip = "Show an alert when Ultimate reaches its current maximum, once per charge.",
+            getFunc = function() return addon.settings.monitorUltimate end,
+            setFunc = function(value)
+                addon.settings.monitorUltimate = value
+                addon.ultimateReady = nil
+            end,
+            default = DEFAULTS.monitorUltimate,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Dragonknight Seething Fury",
+            tooltip = "Show an alert when Seething Fury reaches three stacks.",
+            disabled = function() return not IsDragonknight() end,
+            getFunc = function() return addon.settings.monitorSeethingFury end,
+            setFunc = function(value)
+                addon.settings.monitorSeethingFury = value
+                addon.seethingFuryStacks = nil
+            end,
+            default = DEFAULTS.monitorSeethingFury,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Nightblade Focus stacks",
+            tooltip = "Show an alert when Grim Focus, Merciless Resolve, or Relentless Focus reaches its spectral-bow threshold.",
+            disabled = function() return not IsNightblade() end,
+            getFunc = function() return addon.settings.monitorNightblade end,
+            setFunc = function(value)
+                addon.settings.monitorNightblade = value
+                addon.nightbladeStacks = {}
+            end,
+            default = DEFAULTS.monitorNightblade,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Sorcerer Crystal Fragments",
+            tooltip = "Show an alert when the Crystal Fragments instant-cast proc becomes available.",
+            disabled = function() return not IsSorcerer() end,
+            getFunc = function() return addon.settings.monitorCrystalFragments end,
+            setFunc = function(value)
+                addon.settings.monitorCrystalFragments = value
+                addon.crystalFragmentsReady = nil
+                addon.crystalFragmentsEventSeen = false
+            end,
+            default = DEFAULTS.monitorCrystalFragments,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Necromancer corpse estimate",
+            tooltip = "Estimate available corpses from known generator and consumer events. The estimate is approximate and may drift after missed or external events.",
+            disabled = function() return not IsNecromancer() end,
+            getFunc = function() return addon.settings.monitorNecromancerCorpses end,
+            setFunc = function(value)
+                addon.settings.monitorNecromancerCorpses = value
+                addon.necromancerCorpses = {}
+                addon.necromancerCorpseReady = nil
+                addon.lastNecromancerEventAt = {}
+            end,
+            default = DEFAULTS.monitorNecromancerCorpses,
+        },
+        {
+            type = "slider",
+            name = "Necromancer corpse alert threshold",
+            tooltip = "Alert when the estimated corpse count reaches this many corpses.",
+            min = 1,
+            max = 3,
+            step = 1,
+            disabled = function()
+                return not IsNecromancer() or not addon.settings.monitorNecromancerCorpses
+            end,
+            getFunc = function() return addon.settings.necromancerCorpseThreshold end,
+            setFunc = function(value)
+                addon.settings.necromancerCorpseThreshold = value
+                addon.necromancerCorpseReady = nil
+            end,
+            default = DEFAULTS.necromancerCorpseThreshold,
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Arcanist Crux",
             tooltip = "When enabled for an Arcanist, show Max crux ready when three crux are available and play the configured threshold sounds.",
             disabled = function() return not IsCruxAvailable() end,
             getFunc = function() return addon.settings.monitorCrux end,
@@ -911,56 +1525,43 @@ local function RegisterSettings()
             end,
             default = DEFAULTS.monitorCrux,
         },
+        addon.cruxReadySoundOption,
+        addon.cruxBelowThreeSoundOption,
+    }
+
+    local worldControls = {
         {
-            type = "dropdown",
-            name = "Crux ready sound",
-            tooltip = "Sound played when crux increases to three. Choose None to disable it.",
-            choices = BuildAlertSoundChoices(),
-            scrollable = 7,
-            reference = CRUX_READY_SOUND_DROPDOWN_REFERENCE,
-            disabled = function() return not IsCruxAvailable() end,
-            getFunc = function() return addon.settings.cruxReadySound end,
+            type = "description",
+            text = "Werewolf form transitions and Vampire stage changes are optional. Disable Show in combat only if you want to see non-combat Vampire stage changes.",
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Werewolf form changes",
+            tooltip = "Show alerts when Werewolf form starts and expires.",
+            getFunc = function() return addon.settings.monitorWerewolf end,
             setFunc = function(value)
-                addon.settings.cruxReadySound = value
-                PlayAlertSound(value)
+                addon.settings.monitorWerewolf = value
+                addon.werewolfForm = nil
             end,
-            default = DEFAULTS.cruxReadySound,
+            default = DEFAULTS.monitorWerewolf,
         },
         {
-            type = "dropdown",
-            name = "Crux below-three sound",
-            tooltip = "Sound played once when crux drops from three to below three. Choose None to disable it.",
-            choices = BuildAlertSoundChoices(),
-            scrollable = 7,
-            reference = CRUX_BELOW_THREE_SOUND_DROPDOWN_REFERENCE,
-            disabled = function() return not IsCruxAvailable() end,
-            getFunc = function() return addon.settings.cruxBelowThreeSound end,
+            type = "checkbox",
+            name = "Monitor Vampire stage changes",
+            tooltip = "Show alerts when the active Vampire stage changes or ends. This is an approximate skill-line state based on the player's stage buff.",
+            getFunc = function() return addon.settings.monitorVampire end,
             setFunc = function(value)
-                addon.settings.cruxBelowThreeSound = value
-                PlayAlertSound(value)
+                addon.settings.monitorVampire = value
+                addon.vampireStage = nil
             end,
-            default = DEFAULTS.cruxBelowThreeSound,
-        },
-        {
-            type = "slider",
-            name = "Minimum cooldown or effect duration (seconds)",
-            tooltip = "Only alert for monitored timers whose full duration meets this threshold.",
-            min = 0,
-            max = 120,
-            step = 1,
-            getFunc = function() return addon.settings.minimumCooldownSeconds end,
-            setFunc = function(value) addon.settings.minimumCooldownSeconds = value end,
-            default = DEFAULTS.minimumCooldownSeconds,
-        },
-        {
-            type = "header",
-            name = "Zone types",
+            default = DEFAULTS.monitorVampire,
         },
     }
 
+    local zoneControls = {}
     for _, option in ipairs(ZONE_OPTIONS) do
         local key = option.key
-        table.insert(options, {
+        table.insert(zoneControls, {
             type = "checkbox",
             name = option.name,
             getFunc = function() return addon.settings.zones[key] ~= false end,
@@ -972,26 +1573,9 @@ local function RegisterSettings()
         })
     end
 
-    table.insert(options, {
-        type = "header",
-        name = "Alert appearance and position",
-    })
-    addon.fontOption = {
-        type = "dropdown",
-        name = "Font type",
-        tooltip = "Each font is previewed using its own typeface.",
-        choices = GetFontNames(),
-        scrollable = true,
-        reference = FONT_DROPDOWN_REFERENCE,
-        getFunc = function() return addon.settings.fontName end,
-        setFunc = function(value)
-            addon.settings.fontName = value
-            RefreshOverlay(GetGameTimeMilliseconds())
-        end,
-        default = SYSTEM_FONTS[1].name,
-    }
-    table.insert(options, addon.fontOption)
-    table.insert(options, {
+    local appearanceControls = {
+        addon.fontOption,
+        {
         type = "slider",
         name = "Font size",
         min = 12,
@@ -1003,8 +1587,8 @@ local function RegisterSettings()
             RefreshOverlay(GetGameTimeMilliseconds())
         end,
         default = DEFAULTS.fontSize,
-    })
-    table.insert(options, {
+        },
+        {
         type = "slider",
         name = "Seconds before recast messages fade",
         tooltip = "How long each recast message stays fully visible before fading out.",
@@ -1017,23 +1601,9 @@ local function RegisterSettings()
             RefreshOverlay(GetGameTimeMilliseconds())
         end,
         default = DEFAULTS.alertDisplaySeconds,
-    })
-    addon.alertSoundOption = {
-        type = "dropdown",
-        name = "Alert sound",
-        tooltip = "Choose the sound played when a Recast alert appears. Choose None to mute alerts.",
-        choices = BuildAlertSoundChoices(),
-        scrollable = 7,
-        reference = SOUND_DROPDOWN_REFERENCE,
-        getFunc = function() return addon.settings.alertSound end,
-        setFunc = function(value)
-            addon.settings.alertSound = value
-            PlayAlertSound(value)
-        end,
-        default = DEFAULTS.alertSound,
-    }
-    table.insert(options, addon.alertSoundOption)
-    table.insert(options, {
+        },
+        addon.alertSoundOption,
+        {
         type = "colorpicker",
         name = "Font color",
         getFunc = function()
@@ -1045,8 +1615,8 @@ local function RegisterSettings()
             RefreshOverlay(GetGameTimeMilliseconds())
         end,
         default = DEFAULTS.fontColor,
-    })
-    table.insert(options, {
+        },
+        {
         type = "checkbox",
         name = "Lock alert position",
         tooltip = "Lock the alert position. Move mode unlocks it automatically.",
@@ -1056,22 +1626,21 @@ local function RegisterSettings()
             RefreshOverlay(GetGameTimeMilliseconds())
         end,
         default = DEFAULTS.locked,
-    })
-    table.insert(options, {
+        },
+        {
         type = "button",
         name = "Toggle move mode",
         tooltip = "Keep a visible Recast Radar block on screen so you can drag it. Toggle again to hide it.",
         func = ToggleMoveMode,
-    })
-    table.insert(options, {
-        type = "header",
-        name = "Slotted skills",
-    })
-    table.insert(options, {
+        },
+    }
+
+    local skillControls = {
+        {
         type = "description",
         text = "Click a skill to include or exclude it. The list follows the abilities on both weapon bars.",
-    })
-    table.insert(options, {
+        },
+        {
         type = "custom",
         minHeight = 26,
         maxHeight = 312,
@@ -1083,7 +1652,46 @@ local function RegisterSettings()
             addon.skillsControl = control
             RefreshSkillControls(control)
         end,
-    })
+        },
+    }
+
+    local options = {
+        {
+            type = "submenu",
+            name = "General",
+            controls = generalControls,
+        },
+        {
+            type = "submenu",
+            name = "Cooldowns and effects",
+            controls = cooldownControls,
+        },
+        {
+            type = "submenu",
+            name = "Class resources and procs",
+            controls = classControls,
+        },
+        {
+            type = "submenu",
+            name = "Werewolf and Vampire",
+            controls = worldControls,
+        },
+        {
+            type = "submenu",
+            name = "Zones",
+            controls = zoneControls,
+        },
+        {
+            type = "submenu",
+            name = "Alert appearance and position",
+            controls = appearanceControls,
+        },
+        {
+            type = "submenu",
+            name = "Slotted skills",
+            controls = skillControls,
+        },
+    }
 
     library:RegisterOptionControls(PANEL_ID, options)
 end
@@ -1158,20 +1766,29 @@ local function OnAddonLoaded(_, addonName)
     addon.settings = ZO_SavedVars:NewAccountWide(SAVED_VARIABLES, 1, nil, DEFAULTS)
     addon.settings.zones = addon.settings.zones or {}
     addon.settings.skills = addon.settings.skills or {}
+    local booleanSettings = {
+        "enabled",
+        "showInCombatOnly",
+        "monitorFood",
+        "monitorDrink",
+        "monitorCrux",
+        "monitorUltimate",
+        "monitorSeethingFury",
+        "monitorNightblade",
+        "monitorCrystalFragments",
+        "monitorNecromancerCorpses",
+        "monitorWerewolf",
+        "monitorVampire",
+    }
+    for _, settingName in ipairs(booleanSettings) do
+        if type(addon.settings[settingName]) ~= "boolean" then
+            addon.settings[settingName] = DEFAULTS[settingName]
+        end
+    end
     addon.settings.minimumCooldownSeconds = tonumber(addon.settings.minimumCooldownSeconds) or DEFAULTS.minimumCooldownSeconds
     addon.settings.minimumCooldownSeconds = math.max(0, math.min(120, addon.settings.minimumCooldownSeconds))
-    if type(addon.settings.showInCombatOnly) ~= "boolean" then
-        addon.settings.showInCombatOnly = DEFAULTS.showInCombatOnly
-    end
-    if type(addon.settings.monitorFood) ~= "boolean" then
-        addon.settings.monitorFood = DEFAULTS.monitorFood
-    end
-    if type(addon.settings.monitorDrink) ~= "boolean" then
-        addon.settings.monitorDrink = DEFAULTS.monitorDrink
-    end
-    if type(addon.settings.monitorCrux) ~= "boolean" then
-        addon.settings.monitorCrux = DEFAULTS.monitorCrux
-    end
+    addon.settings.necromancerCorpseThreshold =
+        math.max(1, math.min(3, math.floor(tonumber(addon.settings.necromancerCorpseThreshold) or DEFAULTS.necromancerCorpseThreshold)))
     local legacyFontIndex = math.max(1, math.min(#SYSTEM_FONTS, tonumber(addon.settings.fontIndex) or 1))
     addon.settings.fontName = addon.settings.fontName or SYSTEM_FONTS[legacyFontIndex].name
     addon.settings.fontIndex = nil
@@ -1210,6 +1827,12 @@ local function OnAddonLoaded(_, addonName)
     addon.inCombat = IsUnitInCombat("player")
     EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_PLAYER_COMBAT_STATE, OnCombatStateChanged)
     EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_ACTION_SLOT_UPDATED, OnActionSlotUpdated)
+    local effectEventName = ADDON_NAME .. "_EffectChanged"
+    EVENT_MANAGER:RegisterForEvent(effectEventName, EVENT_EFFECT_CHANGED, OnEffectChanged)
+    EVENT_MANAGER:AddFilterForEvent(effectEventName, EVENT_EFFECT_CHANGED, REGISTER_FILTER_UNIT_TAG, "player")
+    local combatEventName = ADDON_NAME .. "_CombatEvent"
+    EVENT_MANAGER:RegisterForEvent(combatEventName, EVENT_COMBAT_EVENT, OnCombatEvent)
+    EVENT_MANAGER:AddFilterForEvent(combatEventName, EVENT_COMBAT_EVENT, REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE, COMBAT_UNIT_TYPE_PLAYER)
     RefreshMonitoring()
 end
 
