@@ -9,6 +9,7 @@ local LEGACY_SAVED_VARIABLES = "CooldownLapseMonitorSavedVariables"
 local UPDATE_NAME = ADDON_NAME .. "_Update"
 local ALERT_FADE_DURATION_MS = 750
 local POLL_INTERVAL_MS = 100
+local COOLDOWN_RESET_TOLERANCE_MS = POLL_INTERVAL_MS * 2
 local MIN_OVERLAY_WIDTH = 700
 local MAX_OVERLAY_WIDTH = 800
 local MIN_OVERLAY_HEIGHT = 200
@@ -477,14 +478,35 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
             wasCoolingDown = isCoolingDown,
             remaining = observedRemaining,
             duration = observedDuration,
+            cooldownRemaining = cooldownActive and remaining or 0,
+            effectRemaining = effectActive and effectRemaining or 0,
         }
         return
     end
 
     if isCoolingDown then
+        local previousCooldownRemaining = previous.cooldownRemaining or 0
+        local previousEffectRemaining = previous.effectRemaining or 0
+        local cooldownWasReset = previous.wasCoolingDown
+            and cooldownActive
+            and previousCooldownRemaining > 0
+            and remaining > previousCooldownRemaining + COOLDOWN_RESET_TOLERANCE_MS
+        local effectWasReset = previous.wasCoolingDown
+            and effectActive
+            and previousEffectRemaining > 0
+            and effectRemaining > previousEffectRemaining + COOLDOWN_RESET_TOLERANCE_MS
+        local wasReset = cooldownWasReset or effectWasReset
+
         previous.wasCoolingDown = true
         previous.remaining = observedRemaining
-        previous.duration = math.max(previous.duration, observedDuration)
+        previous.cooldownRemaining = cooldownActive and remaining or 0
+        previous.effectRemaining = effectActive and effectRemaining or 0
+        if wasReset then
+            previous.duration = observedDuration
+            addon.lastAlertAt[abilityId] = nil
+        else
+            previous.duration = math.max(previous.duration, observedDuration)
+        end
         return
     end
 
@@ -498,6 +520,8 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
     previous.wasCoolingDown = false
     previous.remaining = 0
     previous.duration = 0
+    previous.cooldownRemaining = 0
+    previous.effectRemaining = 0
 end
 
 local function PollCooldowns()
