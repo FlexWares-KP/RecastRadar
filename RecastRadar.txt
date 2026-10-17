@@ -1,0 +1,10 @@
+## Title: Recast Radar
+## Description: Alerts when slotted skills finish a cooldown during combat.
+## Author: Ixis
+## Version: 1.0.0
+## APIVersion: 101051 101052
+## SavedVariables: CooldownLapseMonitorSavedVariables
+## DependsOn: LibAddonMenu-2.0>=43 LibZone
+## OptionalDependsOn: LibMediaProvider
+
+RecastRadar.lua
