@@ -14,9 +14,19 @@ local FIRST_SKILL_SLOT = ACTION_BAR_FIRST_NORMAL_SLOT_INDEX + 1
 local LAST_SKILL_SLOT = ACTION_BAR_ULTIMATE_SLOT_INDEX + 1
 local HOTBARS = { HOTBAR_CATEGORY_PRIMARY, HOTBAR_CATEGORY_BACKUP }
 local FONT_DROPDOWN_REFERENCE = "RecastRadar_FontDropdown"
+local SOUND_DROPDOWN_REFERENCE = "RecastRadar_SoundDropdown"
+local NO_ALERT_SOUND = "None"
+local DEFAULT_ALERT_SOUND = "Recast Radar Swish"
+
+local BUILTIN_ALERT_SOUNDS = {
+    { name = DEFAULT_ALERT_SOUND, sound = SOUNDS.DEATH_RECAP_KILLING_BLOW_SHOWN },
+    { name = "Soft notification", sound = SOUNDS.TUTORIAL_INFO_SHOWN },
+    { name = "Book acquired", sound = SOUNDS.BOOK_ACQUIRED },
+}
 
 local DEFAULTS = {
     enabled = true,
+    showInCombatOnly = true,
     minimumCooldownSeconds = 10,
     zones = {
         openWorld = true,
@@ -29,6 +39,7 @@ local DEFAULTS = {
     fontSize = 26,
     fontColor = { r = 1, g = 1, b = 1, a = 1 },
     alertDisplaySeconds = 3.5,
+    alertSound = DEFAULT_ALERT_SOUND,
     locked = true,
     positionX = 0,
     positionY = 0,
@@ -59,11 +70,13 @@ local addon = {
     alertLabels = {},
     fontChoices = {},
     fontOption = nil,
+    alertSoundOption = nil,
     moveMode = false,
     panel = nil,
     skillsControl = nil,
     overlay = nil,
     overlayBackdrop = nil,
+    overlayAccent = nil,
     overlaySceneFragment = nil,
     overlayLabel = nil,
     cachedZoneId = nil,
@@ -149,13 +162,48 @@ local function GetFontNames()
     return names
 end
 
-local function GetFontPath()
+local function GetFontPathByName(name)
     for _, font in ipairs(addon.fontChoices) do
-        if font.name == addon.settings.fontName then
+        if font.name == name then
             return font.path
         end
     end
-    return SYSTEM_FONTS[1].path
+end
+
+local function GetFontPath()
+    return GetFontPathByName(addon.settings.fontName) or SYSTEM_FONTS[1].path
+end
+
+local function GetFontPreviewDescriptor(name)
+    local path = GetFontPathByName(name)
+    if path then
+        return string.format("%s|18|soft-shadow-thin", path)
+    end
+end
+
+local function ApplyFontDropdownEntryFont(_, labelControl, rowData)
+    local item = rowData and rowData.GetDataSource and rowData:GetDataSource()
+    local dropdownControl = _G[FONT_DROPDOWN_REFERENCE]
+    if not item or not dropdownControl or item.control ~= dropdownControl then
+        return
+    end
+
+    local font = GetFontPreviewDescriptor(item.name)
+    if font then
+        labelControl:SetFont(font)
+    end
+end
+
+local function ApplyFontDropdownSelectedFont(comboBox, item)
+    local dropdownControl = _G[FONT_DROPDOWN_REFERENCE]
+    if not item or not dropdownControl or comboBox ~= dropdownControl.dropdown then
+        return
+    end
+
+    local font = GetFontPreviewDescriptor(item.value or item.name)
+    if font then
+        comboBox:SetSelectedItemFont(font)
+    end
 end
 
 local function GetOverlayWidth()
@@ -164,6 +212,90 @@ local function GetOverlayWidth()
         1,
         math.min(rootWidth - 40, math.max(MIN_OVERLAY_WIDTH, math.min(MAX_OVERLAY_WIDTH, rootWidth * 0.5)))
     )
+end
+
+local function BuildAlertSoundChoices()
+    local choices = { NO_ALERT_SOUND }
+    local seen = { [NO_ALERT_SOUND] = true }
+
+    for _, sound in ipairs(BUILTIN_ALERT_SOUNDS) do
+        if not seen[sound.name] then
+            seen[sound.name] = true
+            table.insert(choices, sound.name)
+        end
+    end
+
+    if LibMediaProvider then
+        for _, name in ipairs(LibMediaProvider:List("sound") or {}) do
+            if not seen[name] then
+                seen[name] = true
+                table.insert(choices, name)
+            end
+        end
+    end
+
+    table.sort(choices, function(left, right)
+        if left == right then return false end
+        if left == NO_ALERT_SOUND then return true end
+        if right == NO_ALERT_SOUND then return false end
+        return string.lower(left) < string.lower(right)
+    end)
+    return choices
+end
+
+local function IsAlertSoundChoice(name)
+    for _, choice in ipairs(BuildAlertSoundChoices()) do
+        if choice == name then
+            return true
+        end
+    end
+    return false
+end
+
+local function RefreshAlertSoundChoices()
+    if not addon.alertSoundOption then
+        return
+    end
+
+    addon.alertSoundOption.choices = BuildAlertSoundChoices()
+    local control = _G[SOUND_DROPDOWN_REFERENCE]
+    if control and control.UpdateChoices then
+        control:UpdateChoices(addon.alertSoundOption.choices)
+        control:UpdateValue()
+    end
+end
+
+local function PlayAlertSound(soundName)
+    soundName = soundName or addon.settings.alertSound
+    if soundName == NO_ALERT_SOUND then
+        return
+    end
+
+    local sound
+    if LibMediaProvider then
+        sound = LibMediaProvider:Fetch("sound", soundName)
+    end
+    if not sound then
+        for _, builtin in ipairs(BUILTIN_ALERT_SOUNDS) do
+            if builtin.name == soundName then
+                sound = builtin.sound
+                break
+            end
+        end
+    end
+    if not sound then
+        d(string.format("[Recast Radar] Could not find configured sound '%s'.", tostring(soundName)))
+        return
+    end
+    PlaySound(sound)
+end
+
+local function RegisterBuiltinAlertSounds()
+    if LibMediaProvider then
+        for _, sound in ipairs(BUILTIN_ALERT_SOUNDS) do
+            LibMediaProvider:Register("sound", sound.name, sound.sound)
+        end
+    end
 end
 
 local function RefreshFontChoices()
@@ -193,6 +325,7 @@ local function AddAlert(abilityId, skillName, now)
         text = "Recast " .. skillName,
         shownAt = now,
     })
+    PlayAlertSound()
 end
 
 local function RefreshOverlay(now)
@@ -235,8 +368,19 @@ local function RefreshOverlay(now)
     )
 
     addon.overlay:SetDimensions(width, height)
+    local displayedAlertCount = #activeAlerts - (addon.moveMode and 1 or 0)
+    addon.overlayAccent:ClearAnchors()
+    addon.overlayAccent:SetAnchor(
+        TOPLEFT,
+        addon.overlay,
+        TOPLEFT,
+        OVERLAY_PADDING / 2,
+        OVERLAY_PADDING + (addon.moveMode and lineHeight or 0)
+    )
+    addon.overlayAccent:SetDimensions(4, math.max(1, displayedAlertCount * lineHeight))
+    addon.overlayAccent:SetHidden(addon.moveMode or displayedAlertCount == 0)
     addon.overlayLabel:SetDimensions(width - OVERLAY_PADDING * 2, lineHeight)
-    addon.overlayLabel:SetFont(string.format("%s|%d|soft-shadow-thin", GetFontPath(), fontSize))
+    addon.overlayLabel:SetFont(string.format("%s|%d|soft-shadow-thick", GetFontPath(), fontSize))
     addon.overlayLabel:SetHidden(not addon.moveMode)
     local color = addon.settings.fontColor
     for index, alert in ipairs(activeAlerts) do
@@ -251,7 +395,7 @@ local function RefreshOverlay(now)
                 label = WINDOW_MANAGER:CreateControl(nil, addon.overlay, CT_LABEL)
                 label:SetDrawTier(DT_HIGH)
                 label:SetDrawLayer(DL_OVERLAY)
-                label:SetDrawLevel(101)
+                label:SetDrawLevel(102)
                 label:SetMouseEnabled(false)
                 label:SetHorizontalAlignment(TEXT_ALIGN_CENTER)
                 label:SetVerticalAlignment(TEXT_ALIGN_CENTER)
@@ -263,7 +407,7 @@ local function RefreshOverlay(now)
             label:SetAnchor(TOP, addon.overlay, TOP, 0, OVERLAY_PADDING + titleOffset + (alertIndex - 1) * lineHeight)
         end
         label:SetDimensions(width - OVERLAY_PADDING * 2, lineHeight)
-        label:SetFont(string.format("%s|%d|soft-shadow-thin", GetFontPath(), fontSize))
+        label:SetFont(string.format("%s|%d|soft-shadow-thick", GetFontPath(), fontSize))
         label:SetText(alert.text)
         label:SetColor(color.r, color.g, color.b, (color.a or 1) * alert.alpha)
         label:SetHidden(false)
@@ -303,7 +447,7 @@ local function StartMovingOverlay(control)
     end
 end
 
-local function TrackCooldown(slotIndex, hotbarCategory, now)
+local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
     local abilityId = GetSlotBoundId(slotIndex, hotbarCategory)
     local skillName = GetSkillName(slotIndex, hotbarCategory)
     local key = tostring(hotbarCategory) .. ":" .. tostring(slotIndex)
@@ -315,29 +459,34 @@ local function TrackCooldown(slotIndex, hotbarCategory, now)
     end
 
     local remaining, duration, isGlobal = GetSlotCooldownInfo(slotIndex, hotbarCategory)
-    local isCoolingDown = remaining > 0 and not isGlobal
+    local effectDuration = GetActionSlotEffectDuration(slotIndex, hotbarCategory) or 0
+    local effectRemaining = GetActionSlotEffectTimeRemaining(slotIndex, hotbarCategory) or 0
+    local cooldownActive = remaining > 0 and not isGlobal
+    local effectActive = effectDuration > 0 and effectRemaining > 0
+    local isCoolingDown = cooldownActive or effectActive
+    local observedDuration = math.max(cooldownActive and duration or 0, effectActive and effectDuration or 0)
+    local observedRemaining = math.max(cooldownActive and remaining or 0, effectActive and effectRemaining or 0)
     if not previous or previous.abilityId ~= abilityId then
         addon.cooldowns[key] = {
             abilityId = abilityId,
             wasCoolingDown = isCoolingDown,
-            remaining = remaining,
-            duration = duration,
+            remaining = observedRemaining,
+            duration = observedDuration,
         }
         return
     end
 
     if isCoolingDown then
         previous.wasCoolingDown = true
-        previous.remaining = remaining
-        if duration > previous.duration then
-            previous.duration = duration
-        end
+        previous.remaining = observedRemaining
+        previous.duration = math.max(previous.duration, observedDuration)
         return
     end
 
     if previous.wasCoolingDown and previous.remaining > 0
         and previous.duration >= addon.settings.minimumCooldownSeconds * 1000
-        and IsSkillEnabled(abilityId) then
+        and (not addon.settings.showInCombatOnly or addon.inCombat)
+        and zoneEnabled and IsSkillEnabled(abilityId) then
         AddAlert(abilityId, skillName, now)
     end
 
@@ -347,35 +496,36 @@ local function TrackCooldown(slotIndex, hotbarCategory, now)
 end
 
 local function PollCooldowns()
-    if not addon.settings.enabled or not addon.inCombat then
+    if not addon.settings.enabled then
         return
     end
 
-    if not IsCurrentZoneEnabled() then
-        addon.cooldowns = {}
+    local zoneEnabled = IsCurrentZoneEnabled()
+    if not zoneEnabled then
         addon.alerts = {}
-        RefreshOverlay(GetGameTimeMilliseconds())
-        return
     end
 
     local now = GetGameTimeMilliseconds()
     for _, hotbarCategory in ipairs(HOTBARS) do
         for slotIndex = FIRST_SKILL_SLOT, LAST_SKILL_SLOT do
-            TrackCooldown(slotIndex, hotbarCategory, now)
+            TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
         end
     end
     RefreshOverlay(now)
 end
 
 local function RefreshMonitoring()
-    if addon.settings.enabled and addon.inCombat then
+    if addon.settings.enabled then
         EVENT_MANAGER:RegisterForUpdate(UPDATE_NAME, POLL_INTERVAL_MS, PollCooldowns)
     else
         EVENT_MANAGER:UnregisterForUpdate(UPDATE_NAME)
         addon.cooldowns = {}
-        addon.alerts = {}
-        RefreshOverlay(GetGameTimeMilliseconds())
     end
+
+    if not addon.settings.enabled or (addon.settings.showInCombatOnly and not addon.inCombat) then
+        addon.alerts = {}
+    end
+    RefreshOverlay(GetGameTimeMilliseconds())
 end
 
 local function GatherSlottedSkills()
@@ -465,7 +615,7 @@ local function RegisterSettings()
     local options = {
         {
             type = "description",
-            text = "Shows a transparent Recast alert when a slotted skill finishes a cooldown during combat.",
+            text = "Shows a transparent Recast alert when a slotted skill's cooldown or timed slot effect expires, subject to the combat-only setting.",
         },
         {
             type = "checkbox",
@@ -478,9 +628,23 @@ local function RegisterSettings()
             default = DEFAULTS.enabled,
         },
         {
+            type = "checkbox",
+            name = "Show in combat only",
+            tooltip = "When enabled, cooldown alerts appear only if the cooldown finishes during combat.",
+            getFunc = function() return addon.settings.showInCombatOnly end,
+            setFunc = function(value)
+                addon.settings.showInCombatOnly = value
+                if value then
+                    addon.alerts = {}
+                end
+                RefreshMonitoring()
+            end,
+            default = DEFAULTS.showInCombatOnly,
+        },
+        {
             type = "slider",
-            name = "Minimum cooldown duration (seconds)",
-            tooltip = "Only alert for cooldowns whose full duration meets this threshold.",
+            name = "Minimum cooldown or effect duration (seconds)",
+            tooltip = "Only alert for cooldowns or timed slot effects whose full duration meets this threshold.",
             min = 0,
             max = 120,
             step = 1,
@@ -515,6 +679,7 @@ local function RegisterSettings()
     addon.fontOption = {
         type = "dropdown",
         name = "Font type",
+        tooltip = "Each font is previewed using its own typeface.",
         choices = GetFontNames(),
         scrollable = true,
         reference = FONT_DROPDOWN_REFERENCE,
@@ -553,6 +718,21 @@ local function RegisterSettings()
         end,
         default = DEFAULTS.alertDisplaySeconds,
     })
+    addon.alertSoundOption = {
+        type = "dropdown",
+        name = "Alert sound",
+        tooltip = "Choose the sound played when a Recast alert appears. Choose None to mute alerts.",
+        choices = BuildAlertSoundChoices(),
+        scrollable = 7,
+        reference = SOUND_DROPDOWN_REFERENCE,
+        getFunc = function() return addon.settings.alertSound end,
+        setFunc = function(value)
+            addon.settings.alertSound = value
+            PlayAlertSound(value)
+        end,
+        default = DEFAULTS.alertSound,
+    }
+    table.insert(options, addon.alertSoundOption)
     table.insert(options, {
         type = "colorpicker",
         name = "Font color",
@@ -635,16 +815,19 @@ local function OnActionSlotUpdated()
 end
 
 local function OnMediaRegistered(mediaType)
-    if LibMediaProvider and mediaType == LibMediaProvider.MediaType.FONT then
-        RefreshFontChoices()
-        RefreshOverlay(GetGameTimeMilliseconds())
+    if LibMediaProvider then
+        if mediaType == LibMediaProvider.MediaType.FONT then
+            RefreshFontChoices()
+            RefreshOverlay(GetGameTimeMilliseconds())
+        elseif mediaType == "sound" or mediaType == LibMediaProvider.MediaType.SOUND then
+            RefreshAlertSoundChoices()
+        end
     end
 end
 
 local function OnCombatStateChanged(_, inCombat)
     addon.inCombat = inCombat
     if not inCombat then
-        addon.cooldowns = {}
         addon.lastAlertAt = {}
     end
     RefreshMonitoring()
@@ -661,11 +844,17 @@ local function OnAddonLoaded(_, addonName)
     addon.settings.skills = addon.settings.skills or {}
     addon.settings.minimumCooldownSeconds = tonumber(addon.settings.minimumCooldownSeconds) or DEFAULTS.minimumCooldownSeconds
     addon.settings.minimumCooldownSeconds = math.max(0, math.min(120, addon.settings.minimumCooldownSeconds))
+    if type(addon.settings.showInCombatOnly) ~= "boolean" then
+        addon.settings.showInCombatOnly = DEFAULTS.showInCombatOnly
+    end
     local legacyFontIndex = math.max(1, math.min(#SYSTEM_FONTS, tonumber(addon.settings.fontIndex) or 1))
     addon.settings.fontName = addon.settings.fontName or SYSTEM_FONTS[legacyFontIndex].name
     addon.settings.fontIndex = nil
     addon.settings.fontSize = math.max(12, math.min(64, tonumber(addon.settings.fontSize) or DEFAULTS.fontSize))
     addon.settings.alertDisplaySeconds = math.max(1, math.min(10, tonumber(addon.settings.alertDisplaySeconds) or DEFAULTS.alertDisplaySeconds))
+    if type(addon.settings.alertSound) ~= "string" or not IsAlertSoundChoice(addon.settings.alertSound) then
+        addon.settings.alertSound = DEFAULTS.alertSound
+    end
     addon.settings.fontColor = addon.settings.fontColor or {
         r = DEFAULTS.fontColor.r,
         g = DEFAULTS.fontColor.g,
@@ -692,6 +881,10 @@ local function OnAddonLoaded(_, addonName)
     EVENT_MANAGER:RegisterForEvent(ADDON_NAME, EVENT_ACTION_SLOT_UPDATED, OnActionSlotUpdated)
     RefreshMonitoring()
 end
+
+RegisterBuiltinAlertSounds()
+SecurePostHook(ZO_ComboBoxDropdown_Keyboard, "SetupEntryLabel", ApplyFontDropdownEntryFont)
+SecurePostHook(ZO_ComboBox_Base, "ItemSelectedClickHelper", ApplyFontDropdownSelectedFont)
 
 CreateOverlay = function()
     local overlay = WINDOW_MANAGER:CreateControl(nil, GuiRoot, CT_TOPLEVELCONTROL)
@@ -739,12 +932,22 @@ CreateOverlay = function()
     backdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/border_1px_3color.dds", 1, 1, 1, 1)
     addon.overlayBackdrop = backdrop
 
+    local accent = WINDOW_MANAGER:CreateControl(nil, overlay, CT_BACKDROP)
+    accent:SetDimensions(4, 1)
+    accent:SetDrawTier(DT_HIGH)
+    accent:SetDrawLayer(DL_OVERLAY)
+    accent:SetDrawLevel(101)
+    accent:SetMouseEnabled(false)
+    accent:SetCenterColor(0.95, 0.7, 0.25, 0.75)
+    accent:SetEdgeColor(0, 0, 0, 0)
+    addon.overlayAccent = accent
+
     local label = WINDOW_MANAGER:CreateControl(nil, overlay, CT_LABEL)
     label:SetAnchor(TOP, overlay, TOP, 0, OVERLAY_PADDING)
     label:SetDimensions(width - OVERLAY_PADDING * 2, 32)
     label:SetDrawTier(DT_HIGH)
     label:SetDrawLayer(DL_OVERLAY)
-    label:SetDrawLevel(101)
+    label:SetDrawLevel(102)
     label:SetMouseEnabled(false)
     label:SetHorizontalAlignment(TEXT_ALIGN_CENTER)
     label:SetVerticalAlignment(TEXT_ALIGN_CENTER)
