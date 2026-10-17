@@ -23,11 +23,19 @@ local LAST_SKILL_SLOT = ACTION_BAR_ULTIMATE_SLOT_INDEX + 1
 local HOTBARS = { HOTBAR_CATEGORY_PRIMARY, HOTBAR_CATEGORY_BACKUP }
 local FONT_DROPDOWN_REFERENCE = "RecastRadar_FontDropdown"
 local SOUND_DROPDOWN_REFERENCE = "RecastRadar_SoundDropdown"
+local CRUX_READY_SOUND_DROPDOWN_REFERENCE = "RecastRadar_CruxReadySoundDropdown"
+local CRUX_BELOW_THREE_SOUND_DROPDOWN_REFERENCE = "RecastRadar_CruxBelowThreeSoundDropdown"
 local NO_ALERT_SOUND = "None"
 local DEFAULT_ALERT_SOUND = "Recast Radar Swish"
+local DEFAULT_CRUX_READY_SOUND = "Crux ready gong"
+local DEFAULT_CRUX_BELOW_THREE_SOUND = "Crux below three"
+local ARCANIST_CLASS_ID = 7
+local MAX_CRUX = 3
 
 local BUILTIN_ALERT_SOUNDS = {
     { name = DEFAULT_ALERT_SOUND, sound = SOUNDS.DEATH_RECAP_KILLING_BLOW_SHOWN },
+    { name = DEFAULT_CRUX_READY_SOUND, sound = SOUNDS.OBJECTIVE_DISCOVERED },
+    { name = DEFAULT_CRUX_BELOW_THREE_SOUND, sound = SOUNDS.ABILITY_NOT_READY },
     { name = "Soft notification", sound = SOUNDS.TUTORIAL_INFO_SHOWN },
     { name = "Book acquired", sound = SOUNDS.BOOK_ACQUIRED },
 }
@@ -37,6 +45,7 @@ local DEFAULTS = {
     showInCombatOnly = true,
     monitorFood = true,
     monitorDrink = true,
+    monitorCrux = true,
     minimumCooldownSeconds = 10,
     zones = {
         openWorld = true,
@@ -50,6 +59,8 @@ local DEFAULTS = {
     fontColor = { r = 1, g = 1, b = 1, a = 1 },
     alertDisplaySeconds = 3.5,
     alertSound = DEFAULT_ALERT_SOUND,
+    cruxReadySound = DEFAULT_CRUX_READY_SOUND,
+    cruxBelowThreeSound = DEFAULT_CRUX_BELOW_THREE_SOUND,
     locked = true,
     positionX = 0,
     positionY = 0,
@@ -85,6 +96,9 @@ local addon = {
     fontChoices = {},
     fontOption = nil,
     alertSoundOption = nil,
+    cruxReadySoundOption = nil,
+    cruxBelowThreeSoundOption = nil,
+    cruxCount = nil,
     moveMode = false,
     panel = nil,
     skillsControl = nil,
@@ -277,17 +291,24 @@ local function IsAlertSoundChoice(name)
     return false
 end
 
-local function RefreshAlertSoundChoices()
-    if not addon.alertSoundOption then
+local function RefreshSoundChoices(option, reference, choices)
+    if not option then
         return
     end
 
-    addon.alertSoundOption.choices = BuildAlertSoundChoices()
-    local control = _G[SOUND_DROPDOWN_REFERENCE]
+    option.choices = choices
+    local control = _G[reference]
     if control and control.UpdateChoices then
-        control:UpdateChoices(addon.alertSoundOption.choices)
+        control:UpdateChoices(option.choices)
         control:UpdateValue()
     end
+end
+
+local function RefreshAlertSoundChoices()
+    local choices = BuildAlertSoundChoices()
+    RefreshSoundChoices(addon.alertSoundOption, SOUND_DROPDOWN_REFERENCE, choices)
+    RefreshSoundChoices(addon.cruxReadySoundOption, CRUX_READY_SOUND_DROPDOWN_REFERENCE, choices)
+    RefreshSoundChoices(addon.cruxBelowThreeSoundOption, CRUX_BELOW_THREE_SOUND_DROPDOWN_REFERENCE, choices)
 end
 
 local function PlayAlertSound(soundName)
@@ -351,7 +372,23 @@ local function IsFoodDrinkAvailable()
         and type(LIB_FOOD_DRINK_BUFF.GetFoodBuffInfos) == "function"
 end
 
-local function AddAlert(alertKey, displayName, now, icon, prefix)
+local function IsArcanist()
+    if type(GetUnitClassId) ~= "function" then
+        return false
+    end
+
+    local classId = GetUnitClassId("player")
+    local arcanistClassId = type(_G.CLASS_ID_ARCANIST) == "number" and _G.CLASS_ID_ARCANIST or ARCANIST_CLASS_ID
+    return classId == arcanistClassId
+end
+
+local function IsCruxAvailable()
+    return IsArcanist()
+        and type(GetUnitPower) == "function"
+        and type(_G.POWERTYPE_COMBO) == "number"
+end
+
+local function AddAlert(alertKey, displayName, now, icon, prefix, soundName)
     local previousAlert = addon.lastAlertAt[alertKey]
     if previousAlert and now - previousAlert < 1000 then
         return
@@ -366,7 +403,7 @@ local function AddAlert(alertKey, displayName, now, icon, prefix)
         prefix = alertPrefix,
         shownAt = now,
     })
-    PlayAlertSound()
+    PlayAlertSound(soundName)
 end
 
 local function GetAlertDisplayText(alert, fontSize)
@@ -645,6 +682,36 @@ local function TrackFoodDrink(now, zoneEnabled)
     end
 end
 
+local function TrackCrux(now, zoneEnabled)
+    if not addon.settings.monitorCrux or not IsCruxAvailable() then
+        addon.cruxCount = nil
+        return
+    end
+
+    local currentCrux = GetUnitPower("player", _G.POWERTYPE_COMBO)
+    if type(currentCrux) ~= "number" then
+        addon.cruxCount = nil
+        return
+    end
+
+    currentCrux = math.max(0, math.min(MAX_CRUX, math.floor(currentCrux)))
+    local previousCrux = addon.cruxCount
+    addon.cruxCount = currentCrux
+    if previousCrux == nil or currentCrux == previousCrux then
+        return
+    end
+
+    if not zoneEnabled or (addon.settings.showInCombatOnly and not addon.inCombat) then
+        return
+    end
+
+    if previousCrux < MAX_CRUX and currentCrux == MAX_CRUX then
+        AddAlert("crux:max", "Max crux ready", now, nil, "", addon.settings.cruxReadySound)
+    elseif previousCrux == MAX_CRUX and currentCrux < MAX_CRUX then
+        PlayAlertSound(addon.settings.cruxBelowThreeSound)
+    end
+end
+
 local function PollCooldowns()
     if not addon.settings.enabled then
         return
@@ -662,6 +729,7 @@ local function PollCooldowns()
         end
     end
     TrackFoodDrink(now, zoneEnabled)
+    TrackCrux(now, zoneEnabled)
     RefreshOverlay(now)
 end
 
@@ -675,6 +743,7 @@ local function RefreshMonitoring()
             food = nil,
             drink = nil,
         }
+        addon.cruxCount = nil
     end
 
     if not addon.settings.enabled or (addon.settings.showInCombatOnly and not addon.inCombat) then
@@ -825,6 +894,52 @@ local function RegisterSettings()
                 RefreshMonitoring()
             end,
             default = DEFAULTS.monitorDrink,
+        },
+        {
+            type = "header",
+            name = "Arcanist crux",
+        },
+        {
+            type = "checkbox",
+            name = "Monitor Arcanist crux",
+            tooltip = "When enabled for an Arcanist, show Max crux ready when three crux are available and play the configured threshold sounds.",
+            disabled = function() return not IsCruxAvailable() end,
+            getFunc = function() return addon.settings.monitorCrux end,
+            setFunc = function(value)
+                addon.settings.monitorCrux = value
+                addon.cruxCount = nil
+            end,
+            default = DEFAULTS.monitorCrux,
+        },
+        {
+            type = "dropdown",
+            name = "Crux ready sound",
+            tooltip = "Sound played when crux increases to three. Choose None to disable it.",
+            choices = BuildAlertSoundChoices(),
+            scrollable = 7,
+            reference = CRUX_READY_SOUND_DROPDOWN_REFERENCE,
+            disabled = function() return not IsCruxAvailable() end,
+            getFunc = function() return addon.settings.cruxReadySound end,
+            setFunc = function(value)
+                addon.settings.cruxReadySound = value
+                PlayAlertSound(value)
+            end,
+            default = DEFAULTS.cruxReadySound,
+        },
+        {
+            type = "dropdown",
+            name = "Crux below-three sound",
+            tooltip = "Sound played once when crux drops from three to below three. Choose None to disable it.",
+            choices = BuildAlertSoundChoices(),
+            scrollable = 7,
+            reference = CRUX_BELOW_THREE_SOUND_DROPDOWN_REFERENCE,
+            disabled = function() return not IsCruxAvailable() end,
+            getFunc = function() return addon.settings.cruxBelowThreeSound end,
+            setFunc = function(value)
+                addon.settings.cruxBelowThreeSound = value
+                PlayAlertSound(value)
+            end,
+            default = DEFAULTS.cruxBelowThreeSound,
         },
         {
             type = "slider",
@@ -1054,6 +1169,9 @@ local function OnAddonLoaded(_, addonName)
     if type(addon.settings.monitorDrink) ~= "boolean" then
         addon.settings.monitorDrink = DEFAULTS.monitorDrink
     end
+    if type(addon.settings.monitorCrux) ~= "boolean" then
+        addon.settings.monitorCrux = DEFAULTS.monitorCrux
+    end
     local legacyFontIndex = math.max(1, math.min(#SYSTEM_FONTS, tonumber(addon.settings.fontIndex) or 1))
     addon.settings.fontName = addon.settings.fontName or SYSTEM_FONTS[legacyFontIndex].name
     addon.settings.fontIndex = nil
@@ -1061,6 +1179,12 @@ local function OnAddonLoaded(_, addonName)
     addon.settings.alertDisplaySeconds = math.max(1, math.min(10, tonumber(addon.settings.alertDisplaySeconds) or DEFAULTS.alertDisplaySeconds))
     if type(addon.settings.alertSound) ~= "string" or not IsAlertSoundChoice(addon.settings.alertSound) then
         addon.settings.alertSound = DEFAULTS.alertSound
+    end
+    if type(addon.settings.cruxReadySound) ~= "string" or not IsAlertSoundChoice(addon.settings.cruxReadySound) then
+        addon.settings.cruxReadySound = DEFAULTS.cruxReadySound
+    end
+    if type(addon.settings.cruxBelowThreeSound) ~= "string" or not IsAlertSoundChoice(addon.settings.cruxBelowThreeSound) then
+        addon.settings.cruxBelowThreeSound = DEFAULTS.cruxBelowThreeSound
     end
     addon.settings.fontColor = addon.settings.fontColor or {
         r = DEFAULTS.fontColor.r,

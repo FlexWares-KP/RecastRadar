@@ -1,5 +1,5 @@
 ## Title: Recast Radar
-## Description: Alerts when monitored skills, food, or drink timers expire, including timers active when combat begins that expire afterward.
+## Description: Alerts for monitored skill, food, drink, and optional Arcanist crux events.
 ## Author: Ixis
 ## Version: 1.0.0
 ## APIVersion: 101051 101052
