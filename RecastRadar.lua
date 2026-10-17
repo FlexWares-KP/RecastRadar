@@ -509,7 +509,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
             duration = observedDuration,
             cooldownRemaining = cooldownActive and remaining or 0,
             effectRemaining = effectActive and effectRemaining or 0,
-            startedInCombat = isCoolingDown and addon.inCombat or false,
+            combatCountdown = isCoolingDown and addon.inCombat or false,
         }
         return
     end
@@ -528,7 +528,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
         local wasReset = cooldownWasReset or effectWasReset
 
         if not previous.wasCoolingDown or wasReset then
-            previous.startedInCombat = addon.inCombat
+            previous.combatCountdown = addon.inCombat
         end
         previous.wasCoolingDown = true
         previous.remaining = observedRemaining
@@ -545,7 +545,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
 
     if previous.wasCoolingDown and previous.remaining > 0
         and previous.duration >= addon.settings.minimumCooldownSeconds * 1000
-        and (not addon.settings.showInCombatOnly or addon.inCombat or previous.startedInCombat)
+        and (not addon.settings.showInCombatOnly or addon.inCombat or previous.combatCountdown)
         and zoneEnabled and IsSkillEnabled(abilityId) then
         AddAlert(abilityId, skillName, now)
     end
@@ -555,7 +555,7 @@ local function TrackCooldown(slotIndex, hotbarCategory, now, zoneEnabled)
     previous.duration = 0
     previous.cooldownRemaining = 0
     previous.effectRemaining = 0
-    previous.startedInCombat = false
+    previous.combatCountdown = false
 end
 
 local function PollCooldowns()
@@ -890,7 +890,13 @@ end
 
 local function OnCombatStateChanged(_, inCombat)
     addon.inCombat = inCombat
-    if not inCombat then
+    if inCombat then
+        for _, cooldown in pairs(addon.cooldowns) do
+            if cooldown.wasCoolingDown and cooldown.remaining > 0 then
+                cooldown.combatCountdown = true
+            end
+        end
+    else
         addon.lastAlertAt = {}
     end
     RefreshMonitoring()
