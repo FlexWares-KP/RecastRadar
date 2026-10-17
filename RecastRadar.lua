@@ -1,3 +1,7 @@
+-- AI assistance disclaimer: This addon was developed with assistance from AI tools.
+-- AI-generated suggestions were reviewed and adapted by the author; verify behavior
+-- and report issues through the project repository.
+
 local ADDON_NAME = "RecastRadar"
 local PANEL_ID = ADDON_NAME .. "_Settings"
 local SAVED_VARIABLES = "RecastRadarSavedVariables"

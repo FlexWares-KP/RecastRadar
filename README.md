@@ -4,6 +4,10 @@
 **Dependencies:** [LibAddonMenu-2.0](../LibAddonMenu-2.0), [LibZone](../LibZone)  
 **Optional:** [LibMediaProvider](../LibMediaProvider) adds its registered fonts to the font selector.
 
+## AI assistance disclaimer
+
+This project was developed with assistance from AI tools. AI-generated suggestions were reviewed and adapted by the author, but users should verify behavior and report issues through the project repository. The author remains responsible for the final implementation.
+
 Recast Radar tracks cooldowns and timed action-slot effects on both weapon bars while monitoring is enabled. By default, when one expires during combat in an enabled zone, it displays `Recast <skill name>` if the full timer meets the configured minimum. Timers that began before combat are tracked as well. Uncheck **Show in combat only** to display timer expirations outside combat too.
 
 ## Commands
