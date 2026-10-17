@@ -346,6 +346,11 @@ local function IsFoodDrinkEnabled(timeoutType)
     return addon.settings.monitorDrink
 end
 
+local function IsFoodDrinkAvailable()
+    return type(LIB_FOOD_DRINK_BUFF) == "table"
+        and type(LIB_FOOD_DRINK_BUFF.GetFoodBuffInfos) == "function"
+end
+
 local function AddAlert(alertKey, displayName, now, icon, prefix)
     local previousAlert = addon.lastAlertAt[alertKey]
     if previousAlert and now - previousAlert < 1000 then
@@ -583,12 +588,17 @@ local function AddFoodDrinkExpiryAlert(timeoutType, timeout, now, nowSeconds, zo
         return
     end
 
-    local prefix = timeoutType == "food" and "Food expired: " or "Drink expired: "
     local alertKey = timeoutType .. ":" .. tostring(timeout.abilityId)
-    AddAlert(alertKey, timeout.name, now, timeout.icon, prefix)
+    AddAlert(alertKey, timeout.name, now, timeout.icon, "Replenish: ")
 end
 
 local function TrackFoodDrink(now, zoneEnabled)
+    if not IsFoodDrinkAvailable() then
+        addon.foodDrink.food = nil
+        addon.foodDrink.drink = nil
+        return
+    end
+
     local nowSeconds = now / 1000
     local buffType, isDrink, abilityId, buffName, timeStarted, timeEnding, iconTexture =
         LIB_FOOD_DRINK_BUFF:GetFoodBuffInfos("player")
@@ -742,8 +752,8 @@ end
 
 local function RegisterSettings()
     local library = LibAddonMenu2
-    if not library or not LibZone or not LIB_FOOD_DRINK_BUFF then
-        error("Recast Radar requires LibAddonMenu-2.0, LibZone, and LibFoodDrinkBuff.")
+    if not library or not LibZone then
+        error("Recast Radar requires LibAddonMenu-2.0 and LibZone.")
     end
 
     addon.panel = library:RegisterAddonPanel(PANEL_ID, {
@@ -789,7 +799,8 @@ local function RegisterSettings()
         {
             type = "checkbox",
             name = "Monitor food timeouts",
-            tooltip = "When enabled, show an alert when the active food effect expires.",
+            tooltip = "When enabled, show an alert when the active food effect expires. Requires LibFoodDrinkBuff.",
+            disabled = function() return not IsFoodDrinkAvailable() end,
             getFunc = function() return addon.settings.monitorFood end,
             setFunc = function(value)
                 addon.settings.monitorFood = value
@@ -803,7 +814,8 @@ local function RegisterSettings()
         {
             type = "checkbox",
             name = "Monitor drink timeouts",
-            tooltip = "When enabled, show an alert when the active drink effect expires.",
+            tooltip = "When enabled, show an alert when the active drink effect expires. Requires LibFoodDrinkBuff.",
+            disabled = function() return not IsFoodDrinkAvailable() end,
             getFunc = function() return addon.settings.monitorDrink end,
             setFunc = function(value)
                 addon.settings.monitorDrink = value
