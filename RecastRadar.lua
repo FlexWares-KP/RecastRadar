@@ -35,8 +35,13 @@ local NIGHTBLADE_CLASS_ID = 3
 local NECROMANCER_CLASS_ID = 6
 local ARCANIST_CLASS_ID = 117
 local MAX_CRUX = 3
+local CRUX_BUFF_ID = 184220
+local LEGACY_ARCANIST_CLASS_ID = 7
 local MAX_SEETHING_FURY_STACKS = 3
 local NECROMANCER_CORPSE_LIFETIME_MS = 16000
+local CRUX_BUFF_IDS = {
+    [CRUX_BUFF_ID] = true,
+}
 local CRYSTAL_FRAGMENTS_PASSIVE_ID = 46327
 local CRYSTAL_FRAGMENTS_BUFF_IDS = {
     [46327] = true,
@@ -476,7 +481,15 @@ local function IsClass(globalClassName, fallbackClassId)
 end
 
 local function IsArcanist()
-    return IsClass("CLASS_ID_ARCANIST", ARCANIST_CLASS_ID)
+    if type(GetUnitClassId) ~= "function" then
+        return false
+    end
+
+    local classId = GetUnitClassId("player")
+    local configuredClassId = type(_G.CLASS_ID_ARCANIST) == "number" and _G.CLASS_ID_ARCANIST or ARCANIST_CLASS_ID
+    return classId == configuredClassId
+        or classId == ARCANIST_CLASS_ID
+        or classId == LEGACY_ARCANIST_CLASS_ID
 end
 
 local function IsDragonknight()
@@ -497,8 +510,8 @@ end
 
 local function IsCruxAvailable()
     return IsArcanist()
-        and type(GetUnitPower) == "function"
-        and type(_G.POWERTYPE_COMBO) == "number"
+        and type(GetNumBuffs) == "function"
+        and type(GetUnitBuffInfo) == "function"
 end
 
 local function GetPlayerBuffByIds(abilityIds)
@@ -1129,11 +1142,8 @@ local function TrackCrux(now, zoneEnabled)
         return
     end
 
-    local currentCrux = GetUnitPower("player", _G.POWERTYPE_COMBO)
-    if type(currentCrux) ~= "number" then
-        addon.cruxCount = nil
-        return
-    end
+    local cruxBuff = GetPlayerBuffByIds(CRUX_BUFF_IDS)
+    local currentCrux = cruxBuff and cruxBuff.stackCount or 0
 
     currentCrux = math.max(0, math.min(MAX_CRUX, math.floor(currentCrux)))
     local previousCrux = addon.cruxCount
@@ -1722,6 +1732,14 @@ local function OnActionSlotUpdated()
     end
 end
 
+local function OnPlayerActivated()
+    addon.inCombat = IsUnitInCombat("player")
+    if addon.panel and addon.panel.RefreshPanel then
+        addon.panel:RefreshPanel()
+    end
+    RefreshMonitoring()
+end
+
 local function OnMediaRegistered(mediaType)
     if LibMediaProvider then
         if mediaType == LibMediaProvider.MediaType.FONT then
@@ -1833,6 +1851,7 @@ local function OnAddonLoaded(_, addonName)
     local combatEventName = ADDON_NAME .. "_CombatEvent"
     EVENT_MANAGER:RegisterForEvent(combatEventName, EVENT_COMBAT_EVENT, OnCombatEvent)
     EVENT_MANAGER:AddFilterForEvent(combatEventName, EVENT_COMBAT_EVENT, REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE, COMBAT_UNIT_TYPE_PLAYER)
+    EVENT_MANAGER:RegisterForEvent(ADDON_NAME .. "_PlayerActivated", EVENT_PLAYER_ACTIVATED, OnPlayerActivated)
     RefreshMonitoring()
 end
 
